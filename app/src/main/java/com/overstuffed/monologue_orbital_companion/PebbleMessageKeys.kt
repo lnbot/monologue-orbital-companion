@@ -37,14 +37,20 @@ object PebbleMessageKeys {
  * Example: `epochSeconds = [1700000000L]` (0x655B9A00) produces `[0x00, 0x9A, 0x5B, 0x65]`.
  */
 fun encodeEpochsAsUint8LittleEndian(epochSeconds: List<Long>): ByteArray {
-    return ByteArray(epochSeconds.size * 4).also { out ->
+    return ByteArray((epochSeconds.size + 1) * 4).also { out ->
         epochSeconds.forEachIndexed { index, epoch ->
-            val u32 = epoch.toInt() // keep only the lower 32 bits (uint32 semantics)
+            val u32 = epoch.toUInt() // keep only the lower 32 bits (uint32 semantics)
             val base = index * 4
-            out[base] = (u32 and 0xFF).toByte()
-            out[base + 1] = ((u32 ushr 8) and 0xFF).toByte()
-            out[base + 2] = ((u32 ushr 16) and 0xFF).toByte()
-            out[base + 3] = ((u32 ushr 24) and 0xFF).toByte()
+            out[base] = (u32 and 0xFFU).toByte()
+            out[base + 1] = ((u32 shr 8) and 0xFFU).toByte()
+            out[base + 2] = ((u32 shr 16) and 0xFFU).toByte()
+            out[base + 3] = ((u32 shr 24) and 0xFFU).toByte()
+        }
+
+        // uint32 list ends with a 0 value
+        val endIdx = out.size;
+        for (i in 1..4) {
+            out[endIdx - i] = 0;
         }
     }
 }

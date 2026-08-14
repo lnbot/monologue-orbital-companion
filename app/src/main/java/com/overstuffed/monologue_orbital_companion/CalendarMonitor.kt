@@ -217,7 +217,8 @@ class CalendarMonitor(
         val selection = """
             ${CalendarContract.Events.DTSTART} >= ? AND
             ${CalendarContract.Events.DTSTART} <= ? AND
-            ${CalendarContract.Events.CALENDAR_ID} IN ($placeholders)
+            ${CalendarContract.Events.CALENDAR_ID} IN ($placeholders) AND
+            ${CalendarContract.Events.ALL_DAY} != 1
         """.trimIndent().replace("\n", " ")
         val selectionArgs = arrayOf(
             now.toString(),
