@@ -1,30 +1,23 @@
 package com.overstuffed.monologue_orbital_companion
 
+import android.content.ContentResolver
 import android.content.Context
+import android.net.Uri
 import android.util.Log
-import io.rebble.pebblekit2.client.DefaultPebbleInfoRetriever
-import io.rebble.pebblekit2.client.DefaultPebbleSender
-import io.rebble.pebblekit2.common.model.PebbleDictionary
-import io.rebble.pebblekit2.common.model.PebbleDictionaryItem
-import io.rebble.pebblekit2.common.model.TransmissionResult
-import io.rebble.pebblekit2.common.model.WatchIdentifier
-import io.rebble.pebblekit2.model.Watchapp
+import com.getpebble.android.kit.PebbleKit
+import com.getpebble.android.kit.util.PebbleDictionary
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
-/**
- * Coroutine-friendly wrapper around [DefaultPebbleSender] for pushing data to the Monologue Orbital
- * watchface and for querying watch connectivity / running-watchface status.
- *
- * All send/query methods are [suspend] functions and must be called from a coroutine. The underlying
- * [io.rebble.pebblekit2.client.PebbleSender] is created lazily on first use and can be released with
- * [close] when the owning lifecycle ends.
- *
- * Connectivity info via [DefaultPebbleInfoRetriever] only works while the app is in the foreground;
- * background detection would require observing the Pebble content provider (out of scope here).
- */
 /**
  * Identifies the data channel being synchronized to the watchface.
  */
@@ -40,12 +33,27 @@ data class ChannelSyncStatus(
     val lastSuccessfulSyncTime: Long? = null,
 )
 
-class PebbleCommunicationManager(context: Context) {
+/**
+ * Coroutine-friendly wrapper around the classic PebbleKit API ([PebbleKit.sendDataToPebble]) for
+ * pushing data to the Monologue Orbital watchface.
+ *
+ * This uses the **legacy/classic PebbleKit** broadcast-based path
+ * (`com.getpebble.action.app.SEND`) which has no active-app gate and works reliably on Core
+ * Devices (`coredevices.coreapp`), unlike PebbleKit2 whose `DefaultPebbleSender` is rejected
+ * with `FailedDifferentAppOpen` on every send.
+ *
+ * Sends are serialized through a [Mutex] to avoid races while building/broadcasting the shared
+ * dictionary. All send methods launch on a background [CoroutineScope] and update the reactive
+ * status flows.
+ *
+ * Core handles the classic `SEND` broadcast through its runtime-registered receiver; it is
+ * dynamically registered so it does not show up in `pm query-receivers` (manifest-only) — the
+ * earlier "zero recipients" reading was that artifact, not an absent receiver.
+ */
+class PebbleCommunicationManager {
 
-    private val appContext = context.applicationContext
-
-    private val sender: DefaultPebbleSender by lazy { DefaultPebbleSender(appContext) }
-    private val infoRetriever: DefaultPebbleInfoRetriever by lazy { DefaultPebbleInfoRetriever(appContext) }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val sendMutex = Mutex()
 
     // Reactive status of the most recent transmit for each channel.
     private val _alarmSyncStatus = MutableStateFlow(ChannelSyncStatus())
@@ -55,178 +63,150 @@ class PebbleCommunicationManager(context: Context) {
     val calendarSyncStatus: StateFlow<ChannelSyncStatus> = _calendarSyncStatus.asStateFlow()
 
     /**
+     * Returns whether a Pebble/Rebble watch is currently connected.
+     *
+     * Two paths, tried in order:
+     * 1. Legacy [PebbleKit.isWatchConnected] — accurate on API < 34. On Android 14+ (API 34+) its
+     *    internal `registerReceiver(null, ...)` call throws [IllegalArgumentException], so the
+     *    result is discarded and we fall back to the provider.
+     * 2. Direct query of the Core Devices Pebble app content provider
+     *    (`content://coredevices.coreapp.pebblekit/connectedWatches` — the same table PebbleKit2's
+     *    `DefaultPebbleInfoRetriever.getConnectedWatches()` queried). The provider only lists
+     *    watches that are currently connected, so a non-empty cursor means "connected".
+     *
+     * Every failure (no provider installed, [SecurityException], etc.) is logged and yields false —
+     * this method never crashes.
+     *
+     */
+    suspend fun isWatchConnected(context: Context): Boolean {
+        // Path 1: legacy classic PebbleKit broadcast-based check (reliable before Android 14).
+        try {
+            val legacyResult = PebbleKit.isWatchConnected(context)
+            Log.d(TAG, "isWatchConnected: legacy path succeeded -> $legacyResult")
+            return legacyResult
+        } catch (e: Exception) {
+            Log.d(
+                TAG,
+                "isWatchConnected: legacy path failed (${e::class.java.simpleName}: ${e.message}); " +
+                    "falling back to Core content provider.",
+            )
+        }
+
+        // Path 2: Core Devices content provider (the working check on Android 14+).
+        return withContext(Dispatchers.IO) {
+            try {
+                val watchesUri = Uri.withAppendedPath(coreAuthorityUri(), CONNECTED_WATCHES_PATH)
+                context.contentResolver
+                    .query(watchesUri, arrayOf(COLUMN_WATCH_ID), null, null, null)
+                    ?.use { cursor ->
+                        val connected = cursor.count > 0
+                        Log.d(
+                            TAG,
+                            "isWatchConnected: provider query -> connected=$connected " +
+                                "(${cursor.count} watch(es))",
+                        )
+                        connected
+                    }
+                    ?: run {
+                        Log.w(TAG, "isWatchConnected: provider query returned a null cursor.")
+                        false
+                    }
+            } catch (e: Exception) {
+                Log.e(TAG, "isWatchConnected: provider query failed: ${e.message}", e)
+                false
+            }
+        }
+    }
+
+    /**
      * Sends a single alarm epoch-second value to the watchface as key 111 (`uint32`).
      *
+     * The [epochSeconds] value is truncated to 32 bits ([Int]) for compatibility with the
+     * watchface's C uint32_t receiver.
+     *
+     * @param context application context for the PebbleKit broadcast.
      * @param epochSeconds alarm timestamp as Unix epoch seconds.
-     * @return true if the message was acknowledged by the watch, false otherwise.
      */
-    suspend fun sendAlarmSync(epochSeconds: Long): Boolean {
-        val payload: PebbleDictionary = mapOf(
-            PebbleMessageKeys.KEY_SYNC_ALARM to PebbleDictionaryItem.UInt32(epochSeconds),
-        )
-        Log.d(TAG, "sendAlarmSync: sending alarm epoch=$epochSeconds")
-        return sendAndRecord(SyncChannel.ALARM, payload, "alarm-sync")
+    fun sendAlarmSync(context: Context, epochSeconds: Long) {
+        launch("alarm-sync") {
+            Log.d(TAG, "sendAlarmSync: sending alarm epoch=$epochSeconds")
+            val dict = PebbleDictionary()
+            dict.addUint32(PebbleMessageKeys.KEY_SYNC_ALARM, epochSeconds.toInt())
+            performSend(context, dict, "alarm-sync")
+            _alarmSyncStatus.value = _alarmSyncStatus.value.copy(
+                lastTransmitStatus = "Sent",
+                lastSuccessfulSyncTime = System.currentTimeMillis(),
+            )
+        }
     }
 
     /**
      * Sends a list of calendar event epoch-second values as key 112 (`uint8[]`, little-endian uint32).
      *
+     * @param context application context for the PebbleKit broadcast.
      * @param epochSecondList list of event timestamps as Unix epoch seconds.
-     * @return true if the message was acknowledged by the watch, false otherwise.
      */
-    suspend fun sendCalendarSync(epochSecondList: List<Long>): Boolean {
+    fun sendCalendarSync(context: Context, epochSecondList: List<Long>) {
         val bytes = encodeEpochsAsUint8LittleEndian(epochSecondList)
-        Log.d(
-            TAG,
-            "sendCalendarSync: sending ${epochSecondList.size} events (${bytes.size} bytes)",
-        )
-        val payload: PebbleDictionary = mapOf(
-            PebbleMessageKeys.KEY_SYNC_CALENDAR to PebbleDictionaryItem.Bytes(bytes),
-        )
-        return sendAndRecord(SyncChannel.CALENDAR, payload, "calendar-sync")
-    }
-
-    /**
-     * Returns whether at least one Pebble/Rebble watch is currently connected.
-     *
-     * Note: this relies on [DefaultPebbleInfoRetriever], which only reports accurate results while the
-     * app is in the foreground.
-     */
-    suspend fun isWatchConnected(): Boolean {
-        return try {
-            val watches = infoRetriever.getConnectedWatches().first()
-            Log.d(TAG, "isWatchConnected: ${watches.size} connected watch(es): $watches")
-            watches.isNotEmpty()
-        } catch (e: Exception) {
-            Log.w(TAG, "isWatchConnected: failed to query connected watches (foreground only).", e)
-            false
+        Log.d(TAG, "sendCalendarSync: sending ${epochSecondList.size} events (${bytes.size} bytes)")
+        launch("calendar-sync") {
+            val dict = PebbleDictionary()
+            dict.addBytes(PebbleMessageKeys.KEY_SYNC_CALENDAR, bytes)
+            performSend(context, dict, "calendar-sync")
+            _calendarSyncStatus.value = _calendarSyncStatus.value.copy(
+                lastTransmitStatus = "Sent",
+                lastSuccessfulSyncTime = System.currentTimeMillis(),
+            )
         }
     }
 
     /**
-     * Returns whether the Monologue Orbital watchface is currently the active app (WATCHFACE type
-     * with our UUID) on the given watch, or on the first connected watch when [watch] is null.
-     *
-     * Note: this relies on [DefaultPebbleInfoRetriever], which only reports accurate results while the
-     * app is in the foreground.
+     * Serializes one classic PebbleKit send through the [Mutex], executed on [Dispatchers.IO].
+     * Fire-and-forget broadcast — the classic path has no ACK/retry mechanism.
      */
-    suspend fun isWatchfaceRunning(watch: WatchIdentifier? = null): Boolean {
-        val target = watch ?: infoRetriever.getConnectedWatches().first().firstOrNull()?.id
-            ?: run {
-                Log.d(TAG, "isWatchfaceRunning: no connected watch found.")
-                return false
-            }
-        return try {
-            val active = infoRetriever.getActiveApp(target).first()
-            Log.d(TAG, "isWatchfaceRunning: active app UUID=${active?.id}, type=${active?.type}, expected UUID=${PebbleMessageKeys.WATCHFACE_UUID}")
-            val isRunning = active != null &&
-                active.id == PebbleMessageKeys.WATCHFACE_UUID &&
-                active.type == Watchapp.Type.WATCHFACE
-            Log.d(TAG, "isWatchfaceRunning: active app = ${active?.name} (running=$isRunning)")
-            isRunning
-        } catch (e: Exception) {
-            Log.w(TAG, "isWatchfaceRunning: failed to query active app (foreground only).", e)
-            false
-        }
-    }
-
-    /**
-     * Sends [payload] and records the outcome on the given channel's reactive status, updating the
-     * last successful sync time only when the transmit succeeded.
-     *
-     * @return true if the message was acknowledged by the watch, false otherwise.
-     */
-    private suspend fun sendAndRecord(
-        channel: SyncChannel,
-        payload: PebbleDictionary,
-        label: String,
-    ): Boolean {
-        val outcome = transmit(payload, label)
-        val now = System.currentTimeMillis()
-        when (channel) {
-            SyncChannel.ALARM -> {
-                _alarmSyncStatus.value = _alarmSyncStatus.value.copy(
-                    lastTransmitStatus = outcome.status,
-                    lastSuccessfulSyncTime = if (outcome.success) now
-                    else _alarmSyncStatus.value.lastSuccessfulSyncTime,
-                )
-            }
-            SyncChannel.CALENDAR -> {
-                _calendarSyncStatus.value = _calendarSyncStatus.value.copy(
-                    lastTransmitStatus = outcome.status,
-                    lastSuccessfulSyncTime = if (outcome.success) now
-                    else _calendarSyncStatus.value.lastSuccessfulSyncTime,
-                )
-            }
-        }
-        Log.i(
-            TAG,
-            "$label: transmit status='${outcome.status}' success=${outcome.success}" +
-                (if (outcome.success) " lastSuccessfulSync=$now" else ""),
-        )
-        return outcome.success
-    }
-
-    private suspend fun transmit(payload: PebbleDictionary, label: String): TransmitOutcome {
-        return try {
-            Log.d(TAG, "$label: transmit: sending to UUID=${PebbleMessageKeys.WATCHFACE_UUID}")
-            val results = sender.sendDataToPebble(PebbleMessageKeys.WATCHFACE_UUID, payload)
-            if (results == null) {
-                Log.w(
-                    TAG,
-                    "$label: transmission failed, Pebble app is not reachable (not installed or not selected).",
-                )
-                return TransmitOutcome(false, "Pebble app not reachable")
-            }
-            if (results.isEmpty()) {
-                Log.w(TAG, "$label: no connected watches to send to.")
-                return TransmitOutcome(false, "Watch not connected")
-            }
-            val failed = results.values.firstOrNull { it != TransmissionResult.Success }
-            if (failed == null) {
-                Log.i(TAG, "$label: successfully acknowledged by watch.")
-                return TransmitOutcome(true, "Success")
-            }
-            results.forEach { (watch, result) ->
-                Log.d(
-                    TAG,
-                    "$label: watch=$watch result=$result " +
-                        (if (result == TransmissionResult.Success) "(ACK)" else "(FAILED)"),
-                )
-            }
-            TransmitOutcome(false, failed.toStatusString())
-        } catch (e: Exception) {
-            Log.e(TAG, "$label: exception while sending: ${e.message}", e)
-            TransmitOutcome(false, "Unknown")
-        }
-    }
-
-    /** Outcome of a single [transmit] attempt: whether it succeeded and a human-readable status. */
-    private class TransmitOutcome(val success: Boolean, val status: String)
-
-    /** Releases the underlying sender service connection. Call when done using this manager. */
-    fun close() {
+    private fun performSend(context: Context, dict: PebbleDictionary, label: String) {
         try {
-            sender.close()
+            PebbleKit.sendDataToPebble(context, PebbleMessageKeys.WATCHFACE_UUID, dict)
+            Log.i(TAG, "$label -> sent(classic)")
         } catch (e: Exception) {
-            Log.w(TAG, "close: failed to close sender: ${e.message}", e)
+            Log.e(TAG, "$label send failed: ${e.message}", e)
         }
+    }
+
+    /**
+     * Launches a send on the shared background scope, serialized through the [sendMutex].
+     */
+    private fun launch(label: String, block: suspend () -> Unit) {
+        scope.launch {
+            sendMutex.withLock { block() }
+        }
+    }
+
+    /** Cancels the background coroutine scope. Call when done using this manager. */
+    fun close() {
+        scope.cancel()
+        Log.d(TAG, "close: PebbleCommunicationManager released.")
     }
 
     companion object {
         private const val TAG = PebbleMessageKeys.LOG_TAG
-    }
-}
 
-/**
- * Maps [TransmissionResult] to a short, human-readable status string for the UI status section.
- */
-private fun TransmissionResult.toStatusString(): String = when (this) {
-    TransmissionResult.Success -> "Success"
-    TransmissionResult.FailedWatchNotConnected -> "Watch not connected"
-    TransmissionResult.FailedWatchNacked -> "Nacked"
-    TransmissionResult.FailedTimeout -> "Timeout"
-    TransmissionResult.FailedDifferentAppOpen -> "Different app open"
-    TransmissionResult.FailedNoPermissions -> "No permissions"
-    is TransmissionResult.Unknown -> "Unknown"
+        /** Package of the Core Devices Pebble app hosting the PebbleKit content provider. */
+        private const val CORE_APP_PACKAGE = "coredevices.coreapp"
+
+        /** Provider authority: `<package>.pebblekit`. */
+        private const val CORE_PROVIDER_AUTHORITY = "$CORE_APP_PACKAGE.pebblekit"
+
+        /** Path of the connected-watches table (PebbleKit2 ConnectedWatch.CONTENT_PATH). */
+        private const val CONNECTED_WATCHES_PATH = "connectedWatches"
+
+        /** ConnectedWatch.ID column (watch id string). */
+        private const val COLUMN_WATCH_ID = "ID"
+
+        /** Builds the provider authority URI: `content://coredevices.coreapp.pebblekit`. */
+        private fun coreAuthorityUri(): Uri = Uri.Builder()
+            .scheme(ContentResolver.SCHEME_CONTENT)
+            .authority(CORE_PROVIDER_AUTHORITY)
+            .build()
+    }
 }

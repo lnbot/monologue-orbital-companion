@@ -7,6 +7,9 @@ import java.util.UUID
  *
  * These keys must agree exactly with the values defined on the watchface (C) side of
  * the AppMessage protocol.
+ *
+ * Keys are [Int] because the classic PebbleKit [com.getpebble.android.kit.util.PebbleDictionary]
+ * API uses [Int] for dictionary keys.
  */
 object PebbleMessageKeys {
 
@@ -17,13 +20,13 @@ object PebbleMessageKeys {
     val WATCHFACE_UUID: UUID = UUID.fromString("c4b040f4-ea4c-481c-8050-355006f5804d")
 
     /** `uint32`: Next alarm epoch seconds, phone -> watch. */
-    const val KEY_SYNC_ALARM: UInt = 111u
+    const val KEY_SYNC_ALARM: Int = 111
 
     /** `uint8[]`: Encoded list of calendar event epoch seconds (little-endian uint32), phone -> watch. */
-    const val KEY_SYNC_CALENDAR: UInt = 112u
+    const val KEY_SYNC_CALENDAR: Int = 112
 
     /** `uint8`: Flag sent by the watch -> phone to request a re-sync. */
-    const val KEY_SYNC_REQUEST: UInt = 110u
+    const val KEY_SYNC_REQUEST: Int = 110
 }
 
 /**

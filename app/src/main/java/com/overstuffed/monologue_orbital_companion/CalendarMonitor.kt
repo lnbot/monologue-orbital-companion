@@ -195,13 +195,11 @@ class CalendarMonitor(
             return
         }
         val epochSeconds = queryUpcomingEventEpochSeconds()
-        scope.launch {
-            val success = pebbleCommunicationManager.sendCalendarSync(epochSeconds)
-            Log.i(
-                TAG,
-                "syncCurrentEvents: result=$success (${epochSeconds.size} events sent to watch).",
-            )
-        }
+        pebbleCommunicationManager.sendCalendarSync(appContext, epochSeconds)
+        Log.i(
+            TAG,
+            "syncCurrentEvents: ${epochSeconds.size} events sent to watch.",
+        )
     }
 
     // ---------------------------------------------------------------

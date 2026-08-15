@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:tools="http://schemas.android.com/tools">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
@@ -26,19 +25,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!--
-            Receives AppMessages from the Monologue Orbital watchface.
-            Required by PebbleKitAndroid2 (io.rebble.pebblekit2).
-        -->
-        <service
-            android:name=".PebbleListenerService"
-            android:exported="true"
-            tools:ignore="ExportedService">
-            <intent-filter>
-                <action android:name="io.rebble.pebblekit2.RECEIVE_DATA_FROM_WATCH" />
-            </intent-filter>
-        </service>
     </application>
 
 </manifest>

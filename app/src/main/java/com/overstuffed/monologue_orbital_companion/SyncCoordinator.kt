@@ -93,10 +93,12 @@ object SyncCoordinator {
         appContext = context.applicationContext
         settingsRepository = SettingsRepository(appContext!!)
         syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val manager = PebbleCommunicationManager(appContext!!)
+        val manager = PebbleCommunicationManager()
         pebbleCommunicationManager = manager
         alarmMonitor = AlarmMonitor(appContext!!, manager)
         calendarMonitor = CalendarMonitor(appContext!!, manager)
+        // Start listening for incoming messages from the watch via classic PebbleKit broadcast.
+        PebbleListenerService.register(appContext!!)
         Log.i(TAG, "initialize: SyncCoordinator ready (AlarmMonitor + CalendarMonitor created).")
         loadPersistedSettings()
     }
@@ -265,10 +267,11 @@ object SyncCoordinator {
     // Shutdown
     // ---------------------------------------------------------------
 
-    /** Releases the alarm monitor, calendar monitor, and shared pebble manager. Call when shutting down. */
+    /** Releases the alarm monitor, calendar monitor, shared pebble manager, and listener. Call when shutting down. */
     fun shutdown() {
         alarmMonitor?.cleanup()
         calendarMonitor?.cleanup()
+        PebbleListenerService.unregister(appContext ?: return)
         pebbleCommunicationManager?.close()
         syncScope?.cancel()
         syncScope = null

@@ -24,7 +24,6 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Sync
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -51,7 +50,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -67,8 +65,7 @@ import kotlinx.coroutines.launch
  * - a [Switch] to enable/disable alarm syncing,
  * - a [Switch] to enable/disable calendar syncing (requesting READ_CALENDAR the first time),
  * - a list of per-calendar [Checkbox]es (visible only while calendar sync is on),
- * - a "Sync Now" [Button] that performs a force sync when the watch is reachable,
- * - a "Cannot Sync" [AlertDialog] when the watch isn't connected / watchface isn't running.
+ * - a "Sync Now" [Button] that performs a force sync.
  *
  * All user actions are logged to Logcat via [TAG].
  */
@@ -84,7 +81,6 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     val alarmSyncEnabled by SyncCoordinator.alarmSyncEnabled.collectAsState()
     val calendarSyncEnabled by SyncCoordinator.calendarSyncEnabled.collectAsState()
     var calendars by remember { mutableStateOf(SyncCoordinator.getAvailableCalendars()) }
-    var showCannotSyncDialog by remember { mutableStateOf(false) }
 
     // Reactive transmit status from the shared manager (null-safe; defaults shown until a manager exists).
     val manager = SyncCoordinator.pebbleCommunicationManager
@@ -172,26 +168,10 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     }
 
     fun onForceSync() {
-        Log.i(TAG, "Force sync button pressed.")
+        Log.i(TAG, "Force sync button pressed; requesting sync.")
         scope.launch {
-            val manager = SyncCoordinator.pebbleCommunicationManager
-            val connected = manager?.isWatchConnected() ?: false
-            val watchfaceRunning = if (connected) {
-                manager?.isWatchfaceRunning() ?: false
-            } else {
-                false
-            }
-            if (connected && watchfaceRunning) {
-                Log.i(TAG, "Watch connected ($connected) and watchface running ($watchfaceRunning); requesting sync.")
-                SyncCoordinator.requestSync()
-                snackbarHostState.showSnackbar("Sync requested.")
-            } else {
-                Log.w(
-                    TAG,
-                    "Sync dialog shown (watch disconnected or watchface not running). connected=$connected watchfaceRunning=$watchfaceRunning.",
-                )
-                showCannotSyncDialog = true
-            }
+            SyncCoordinator.requestSync()
+            snackbarHostState.showSnackbar("Sync requested.")
         }
     }
 
@@ -348,14 +328,6 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    if (showCannotSyncDialog) {
-        CannotSyncDialog(
-            onDismiss = {
-                showCannotSyncDialog = false
-                Log.i(TAG, "Cannot sync dialog dismissed.")
-            },
-        )
-    }
 }
 
 /**
@@ -408,30 +380,6 @@ private fun SwitchRow(
             Switch(checked = checked, onCheckedChange = onCheckedChange)
         }
     }
-}
-
-/**
- * Modal shown when a force sync can't proceed because the watch is unreachable or the
- * Monologue watchface isn't running on it.
- */
-@Composable
-private fun CannotSyncDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Cannot Sync") },
-        text = {
-            Text(
-                "Your watch is not connected or the Monologue watchface is not currently " +
-                    "running. Please open the watchface on your Pebble and try again.",
-                textAlign = TextAlign.Start,
-            )
-        },
-        confirmButton = {
-            Button(onClick = onDismiss) {
-                Text("OK")
-            }
-        },
-    )
 }
 
 @Preview(showBackground = true)

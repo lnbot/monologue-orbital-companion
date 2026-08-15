@@ -104,11 +104,11 @@ class AlarmMonitor(
         }
         val epochSeconds = getNextAlarmEpochSeconds() ?: 0L
         scope.launch {
-            val success = pebbleCommunicationManager.sendAlarmSync(epochSeconds)
+            pebbleCommunicationManager.sendAlarmSync(appContext, epochSeconds)
             Log.i(
                 TAG,
-                "syncCurrentAlarm: result=$success (alarm epoch=$epochSeconds, " +
-                    "${if (epochSeconds == 0L) "cleared on watch" else "sent to watch"}).",
+                "syncCurrentAlarm: alarm epoch=$epochSeconds " +
+                    "${if (epochSeconds == 0L) "cleared on watch" else "sent to watch"}.",
             )
         }
     }
