@@ -21,6 +21,8 @@ class PebbleListenerService : BasePebbleListenerService() {
         data: PebbleDictionary,
         watch: WatchIdentifier,
     ): ReceiveResult {
+        Log.d(TAG, "onMessageReceived: from watchappUUID=$watchappUUID")
+
         // Only handle messages for our watchface; silently ignore others.
         if (watchappUUID != PebbleMessageKeys.WATCHFACE_UUID) {
             Log.w(
@@ -35,7 +37,7 @@ class PebbleListenerService : BasePebbleListenerService() {
         // Watch -> phone request to re-sync. Any numeric value present acts as the trigger flag.
         if (data.containsKey(PebbleMessageKeys.KEY_SYNC_REQUEST)) {
             Log.i(TAG, "onMessageReceived: sync request (key ${PebbleMessageKeys.KEY_SYNC_REQUEST}) from watch=$watch.")
-            SyncCoordinator.requestSync()
+            SyncCoordinator.onWatchSyncRequested()
         } else {
             Log.d(TAG, "onMessageReceived: received message with keys ${data.keys} (no sync request).")
         }

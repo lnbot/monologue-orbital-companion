@@ -2,6 +2,15 @@ package com.overstuffed.monologue_orbital_companion
 
 import android.content.Context
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 /**
  * Central coordinator for synchronizing phone-side data (alarms, calendar events) with the
@@ -20,6 +29,21 @@ object SyncCoordinator {
 
     private const val TAG = PebbleMessageKeys.LOG_TAG
 
+    /** Epoch millis of the last SyncRequest received from the watch, or null if never. */
+    private val _lastSyncRequestTime = MutableStateFlow<Long?>(null)
+
+    /** Public read-only snapshot of [lastSyncRequestTime]. */
+    val lastSyncRequestTime: StateFlow<Long?> = _lastSyncRequestTime.asStateFlow()
+
+    /**
+     * Called by [PebbleListenerService] when the watch sends a SyncRequest (message key 110).
+     * Records the current time and then triggers [requestSync].
+     */
+    fun onWatchSyncRequested() {
+        _lastSyncRequestTime.value = System.currentTimeMillis()
+        requestSync()
+    }
+
     /**
      * A hook the listener invokes when the watch requests a re-sync. Later tasks may point this at
      * additional sync routines; until then it only logs.
@@ -37,6 +61,22 @@ object SyncCoordinator {
 
     private var appContext: Context? = null
 
+    private val _alarmSyncEnabled = MutableStateFlow(false)
+
+    /** Whether alarm syncing is currently active (reactive — UI collects this). */
+    val alarmSyncEnabled: StateFlow<Boolean> = _alarmSyncEnabled.asStateFlow()
+
+    private val _calendarSyncEnabled = MutableStateFlow(false)
+
+    /** Whether calendar syncing is currently active (reactive — UI collects this). */
+    val calendarSyncEnabled: StateFlow<Boolean> = _calendarSyncEnabled.asStateFlow()
+
+    /** Backing store for persisted settings (created during [initialize]). */
+    private var settingsRepository: SettingsRepository? = null
+
+    /** Scope used for best-effort (async) persistence and initial settings load. */
+    private var syncScope: CoroutineScope? = null
+
     private var initialized = false
 
     /**
@@ -51,11 +91,69 @@ object SyncCoordinator {
         if (initialized) return
         initialized = true
         appContext = context.applicationContext
+        settingsRepository = SettingsRepository(appContext!!)
+        syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         val manager = PebbleCommunicationManager(appContext!!)
         pebbleCommunicationManager = manager
         alarmMonitor = AlarmMonitor(appContext!!, manager)
         calendarMonitor = CalendarMonitor(appContext!!, manager)
         Log.i(TAG, "initialize: SyncCoordinator ready (AlarmMonitor + CalendarMonitor created).")
+        loadPersistedSettings()
+    }
+
+    /**
+     * Asynchronously loads the persisted settings from DataStore and applies them.
+     *
+     * Runs off the main thread so it never blocks UI. Any DataStore read failure is caught and
+     * logged; the app simply falls back to defaults.
+     */
+    private fun loadPersistedSettings() {
+        val repo = settingsRepository
+        val scope = syncScope
+        if (repo == null || scope == null) return
+        scope.launch {
+            try {
+                val alarmEnabled = repo.alarmSyncEnabled.first()
+                val calendarEnabled = repo.calendarSyncEnabled.first()
+                if (repo.wasCalendarSelectionStored()) {
+                    calendarMonitor?.applyPersistedSelection(repo.selectedCalendarIds.first())
+                }
+                applyAlarmSyncEnabled(alarmEnabled)
+                applyCalendarSyncEnabled(calendarEnabled)
+                Log.i(
+                    TAG,
+                    "loadPersistedSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled.",
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "loadPersistedSettings: failed to load persisted settings.", e)
+            }
+        }
+    }
+
+    /** Updates in-memory alarm state (and its flow) without persisting — used when loading. */
+    private fun applyAlarmSyncEnabled(enabled: Boolean) {
+        alarmMonitor?.enabled = enabled
+        _alarmSyncEnabled.value = enabled
+    }
+
+    /** Updates in-memory calendar state (and its flow) without persisting — used when loading. */
+    private fun applyCalendarSyncEnabled(enabled: Boolean) {
+        calendarMonitor?.enabled = enabled
+        _calendarSyncEnabled.value = enabled
+    }
+
+    /** Best-effort, async persistence. Failures are logged and never propagated to the caller. */
+    private fun persist(block: suspend (SettingsRepository) -> Unit) {
+        val repo = settingsRepository
+        val scope = syncScope
+        if (repo == null || scope == null) return
+        scope.launch {
+            try {
+                block(repo)
+            } catch (e: Exception) {
+                Log.e(TAG, "persist: failed to save setting.", e)
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -73,6 +171,8 @@ object SyncCoordinator {
             return
         }
         monitor.enabled = enabled
+        _alarmSyncEnabled.value = enabled
+        persist { it.setAlarmSyncEnabled(enabled) }
     }
 
     /** Whether alarm syncing is currently active. */
@@ -94,6 +194,8 @@ object SyncCoordinator {
             return
         }
         monitor.enabled = enabled
+        _calendarSyncEnabled.value = enabled
+        persist { it.setCalendarSyncEnabled(enabled) }
     }
 
     /** Whether calendar syncing is currently active. */
@@ -126,6 +228,7 @@ object SyncCoordinator {
             return
         }
         monitor.setCalendarSelected(calendarId, selected)
+        persist { it.setSelectedCalendarIds(monitor.currentSelectedIds()) }
     }
 
     // ---------------------------------------------------------------
@@ -167,6 +270,11 @@ object SyncCoordinator {
         alarmMonitor?.cleanup()
         calendarMonitor?.cleanup()
         pebbleCommunicationManager?.close()
+        syncScope?.cancel()
+        syncScope = null
+        settingsRepository = null
+        _alarmSyncEnabled.value = false
+        _calendarSyncEnabled.value = false
         initialized = false
         appContext = null
         alarmMonitor = null

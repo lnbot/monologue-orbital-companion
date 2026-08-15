@@ -51,10 +51,11 @@ class CalendarMonitor(
     private var observerRegistered: Boolean = false
 
     /**
-     * Persists user preference for each calendar between internal list refreshes.
-     * Defaults to `true` (selected) for any calendar not yet seen.
+     * The set of explicitly-selected calendar IDs (as strings), or `null` when the user has never
+     * made a choice. `null` means *every* visible calendar is selected by default; an explicit
+     * (possibly empty) set overrides that default.
      */
-    private val selectedByCalendarId = mutableMapOf<Long, Boolean>()
+    private var selectedIds: Set<String>? = null
 
     /** The latest list of visible calendars, cached for the UI. */
     private val availableCalendars = mutableListOf<CalendarInfo>()
@@ -140,7 +141,10 @@ class CalendarMonitor(
             Log.w(TAG, "setCalendarSelected: unknown calendar id=$calendarId.")
             return
         }
-        selectedByCalendarId[calendarId] = selected
+        // Start from the current explicit selection, or (before the first choice) every visible
+        // calendar, then add/remove the toggled calendar.
+        val current = selectedIds ?: availableCalendars.map { it.calendarId.toString() }.toSet()
+        selectedIds = if (selected) current + calendarId.toString() else current - calendarId.toString()
         val updated = availableCalendars[index].copy(selected = selected)
         availableCalendars[index] = updated
         Log.i(
@@ -149,6 +153,29 @@ class CalendarMonitor(
         )
         if (enabled) {
             syncCurrentEvents()
+        }
+    }
+
+    /**
+     * The set of currently-selected calendar IDs (as strings). Returns the explicit selection, or
+     * — when the user has never chosen — every visible calendar.
+     */
+    fun currentSelectedIds(): Set<String> =
+        selectedIds ?: availableCalendars.map { it.calendarId.toString() }.toSet()
+
+    /**
+     * Applies a persisted selection (calendar IDs as strings) loaded from settings.
+     *
+     * Calendars present in [ids] are selected; visible calendars absent from [ids] are unselected.
+     * A non-empty [ids] that was loaded after a prior write reflects the user's previous choice
+     * exactly (including the empty set meaning "none selected").
+     */
+    fun applyPersistedSelection(ids: Set<String>) {
+        selectedIds = ids
+        Log.i(TAG, "applyPersistedSelection: ${ids.size} selected calendar ID(s) loaded.")
+        // If a list is already shown, re-derive it so the UI reflects the persisted selection.
+        if (availableCalendars.isNotEmpty() && checkPermission(appContext)) {
+            refreshAvailableCalendars()
         }
     }
 
@@ -266,7 +293,7 @@ class CalendarMonitor(
 
     /**
      * Re-reads the list of visible calendars from [CalendarContract.Calendars] while preserving
-     * any user-selectable state stored in [selectedByCalendarId].
+     * any user-selectable state stored in [selectedIds].
      */
     private fun refreshAvailableCalendars() {
         if (!checkPermission(appContext)) {
@@ -301,7 +328,7 @@ class CalendarMonitor(
                     val id = cursor.getLong(idCol)
                     val name = cursor.getString(nameCol) ?: "Calendar $id"
                     val account = if (accountCol >= 0) cursor.getString(accountCol) else null
-                    val selected = selectedByCalendarId[id] ?: true
+                    val selected = selectedIds?.contains(id.toString()) ?: true
                     newCalendars.add(CalendarInfo(id, name, account, selected))
                 }
             } ?: Log.w(TAG, "refreshAvailableCalendars: cursor was null.")

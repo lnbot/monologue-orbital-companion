@@ -40,6 +40,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,6 +55,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlinx.coroutines.launch
 
 /**
@@ -74,11 +79,24 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    // Local UI state seeded from the coordinator's current persisted values.
-    var alarmSyncEnabled by remember { mutableStateOf(SyncCoordinator.isAlarmSyncEnabled()) }
-    var calendarSyncEnabled by remember { mutableStateOf(SyncCoordinator.isCalendarSyncEnabled()) }
+    // Reactive sync-enabled state collected from the coordinator, which is populated from
+    // DataStore during initialize(). Toggles update automatically when persisted values load.
+    val alarmSyncEnabled by SyncCoordinator.alarmSyncEnabled.collectAsState()
+    val calendarSyncEnabled by SyncCoordinator.calendarSyncEnabled.collectAsState()
     var calendars by remember { mutableStateOf(SyncCoordinator.getAvailableCalendars()) }
     var showCannotSyncDialog by remember { mutableStateOf(false) }
+
+    // Reactive transmit status from the shared manager (null-safe; defaults shown until a manager exists).
+    val manager = SyncCoordinator.pebbleCommunicationManager
+    val alarmSyncStatus by manager?.alarmSyncStatus
+        ?.collectAsState(initial = ChannelSyncStatus())
+        ?: remember { mutableStateOf(ChannelSyncStatus()) }
+    val calendarSyncStatus by manager?.calendarSyncStatus
+        ?.collectAsState(initial = ChannelSyncStatus())
+        ?: remember { mutableStateOf(ChannelSyncStatus()) }
+
+    // Reactive timestamp of the last SyncRequest received from the watch.
+    val lastWatchSyncRequestTime by SyncCoordinator.lastSyncRequestTime.collectAsState()
 
     val calendarPermissionGranted = ContextCompat.checkSelfPermission(
         context,
@@ -92,12 +110,10 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         if (granted) {
             Log.i(TAG, "READ_CALENDAR permission granted.")
             SyncCoordinator.setCalendarSyncEnabled(true)
-            calendarSyncEnabled = true
             calendars = SyncCoordinator.getAvailableCalendars()
             Log.i(TAG, "Calendar sync enabled with ${calendars.size} available calendar(s).")
         } else {
             // Never set the toggle on if the user declined.
-            calendarSyncEnabled = false
             val permanentlyDenied = (context as? Activity)?.let {
                 !it.shouldShowRequestPermissionRationale(Manifest.permission.READ_CALENDAR)
             } ?: false
@@ -114,7 +130,6 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     fun onAlarmToggle(checked: Boolean) {
         Log.i(TAG, "UI: alarm sync toggle -> $checked")
         SyncCoordinator.setAlarmSyncEnabled(checked)
-        alarmSyncEnabled = SyncCoordinator.isAlarmSyncEnabled()
         if (checked) {
             Log.i(TAG, "Alarm sync enabled.")
         } else {
@@ -128,7 +143,6 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
             if (calendarPermissionGranted) {
                 Log.i(TAG, "Calendar permission already granted; enabling calendar sync.")
                 SyncCoordinator.setCalendarSyncEnabled(true)
-                calendarSyncEnabled = true
                 calendars = SyncCoordinator.getAvailableCalendars()
                 Log.i(TAG, "Calendar sync enabled with ${calendars.size} available calendar(s).")
             } else {
@@ -137,8 +151,15 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
             }
         } else {
             SyncCoordinator.setCalendarSyncEnabled(false)
-            calendarSyncEnabled = false
             Log.i(TAG, "Calendar sync disabled.")
+        }
+    }
+
+    // Re-fetch the calendar list whenever calendar sync becomes enabled (including after the async
+    // DataStore load on relaunch), so persisted per-calendar selections show up.
+    LaunchedEffect(calendarSyncEnabled) {
+        if (calendarSyncEnabled && calendarPermissionGranted) {
+            calendars = SyncCoordinator.getAvailableCalendars()
         }
     }
 
@@ -296,12 +317,16 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
             val selectedCalendarCount = calendars.count { it.selected }
             val statusText = buildString {
                 appendLine("Alarm sync: ${if (alarmSyncEnabled) "Enabled" else "Disabled"}")
-                append(
-                    "Calendar sync: ${if (calendarSyncEnabled) "Enabled" else "Disabled"}",
-                )
+                appendLine("  Last transmit: ${alarmSyncStatus.lastTransmitStatus ?: "—"}")
+                appendLine("  Last successful sync: ${formatSyncTime(alarmSyncStatus.lastSuccessfulSyncTime)}")
+                append("Calendar sync: ${if (calendarSyncEnabled) "Enabled" else "Disabled"}")
                 if (calendarSyncEnabled) {
                     append(" • $selectedCalendarCount calendar(s) selected")
                 }
+                appendLine()
+                appendLine("  Last transmit: ${calendarSyncStatus.lastTransmitStatus ?: "—"}")
+                appendLine("  Last successful sync: ${formatSyncTime(calendarSyncStatus.lastSuccessfulSyncTime)}")
+                append("Last sync request from watch: ${formatSyncTime(lastWatchSyncRequestTime)}")
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -418,3 +443,12 @@ private fun ConfigurationScreenPreview() {
 }
 
 private const val TAG = "MonologueConfigUI"
+
+/**
+ * Formats an epoch-millis timestamp as a friendly date/time, or returns "Never" when null (i.e. the
+ * channel has never successfully synced).
+ */
+private fun formatSyncTime(epochMillis: Long?): String {
+    if (epochMillis == null) return "Never"
+    return SimpleDateFormat("EEE, MMM d HH:mm:ss", Locale.getDefault()).format(Date(epochMillis))
+}
