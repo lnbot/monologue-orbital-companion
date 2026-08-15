@@ -25,6 +25,9 @@ object PebbleMessageKeys {
     /** `uint8[]`: Encoded list of calendar event epoch seconds (little-endian uint32), phone -> watch. */
     const val KEY_SYNC_CALENDAR: Int = 112
 
+    /** `uint32`: Active timer finish epoch seconds, phone -> watch. 0 clears the watch's timer display. */
+    const val KEY_SYNC_TIMER: Int = 113
+
     /** `uint8`: Flag sent by the watch -> phone to request a re-sync. */
     const val KEY_SYNC_REQUEST: Int = 110
 }

@@ -32,7 +32,7 @@ import kotlinx.coroutines.withContext
 /**
  * Identifies the data channel being synchronized to the watchface.
  */
-enum class SyncChannel { ALARM, CALENDAR }
+enum class SyncChannel { ALARM, CALENDAR, TIMER }
 
 /**
  * Reactive per-channel status of the most recent transmit attempt and the last successful sync.
@@ -130,6 +130,9 @@ class PebbleCommunicationManager {
 
     private val _calendarSyncStatus = MutableStateFlow(ChannelSyncStatus())
     val calendarSyncStatus: StateFlow<ChannelSyncStatus> = _calendarSyncStatus.asStateFlow()
+
+    private val _timerSyncStatus = MutableStateFlow(ChannelSyncStatus())
+    val timerSyncStatus: StateFlow<ChannelSyncStatus> = _timerSyncStatus.asStateFlow()
 
     // ------------------------------------------------------------------
     // ACK/NACK receiver lifecycle
@@ -254,6 +257,7 @@ class PebbleCommunicationManager {
         val channel = when (transactionId) {
             ALARM_TRANSACTION_ID -> SyncChannel.ALARM
             CALENDAR_TRANSACTION_ID -> SyncChannel.CALENDAR
+            TIMER_TRANSACTION_ID -> SyncChannel.TIMER
             else -> null
         }
         if (channel == null) {
@@ -314,6 +318,7 @@ class PebbleCommunicationManager {
         when (channel) {
             SyncChannel.ALARM -> _alarmSyncStatus
             SyncChannel.CALENDAR -> _calendarSyncStatus
+            SyncChannel.TIMER -> _timerSyncStatus
         }
 
     /**
@@ -476,6 +481,35 @@ class PebbleCommunicationManager {
     }
 
     /**
+     * Sends a single timer finish epoch-second value to the watchface as key 113 (`uint32`).
+     *
+     * Pass `0` when no timer is currently running so the watch can clear any stale timer display
+     * (mirroring the alarm channel's no-alarm behaviour). As with [sendAlarmSync], the value is
+     * truncated to 32 bits for compatibility with the watchface's C uint32_t receiver.
+     *
+     * The send carries [TIMER_TRANSACTION_ID] so the matching RECEIVE_ACK / RECEIVE_NACK can be
+     * correlated back to the timer channel.
+     *
+     * @param context application context for the PebbleKit broadcast.
+     * @param epochSeconds timer finish timestamp as Unix epoch seconds (0 clears the watch display).
+     */
+    fun sendTimerSync(context: Context, epochSeconds: Long) {
+        launch("timer-sync") {
+            Log.d(TAG, "sendTimerSync: sending timer epoch=$epochSeconds")
+            sendWithRetrySupport(
+                channel = SyncChannel.TIMER,
+                context = context,
+                buildDict = {
+                    PebbleDictionary().also {
+                        it.addUint32(PebbleMessageKeys.KEY_SYNC_TIMER, epochSeconds.toInt())
+                    }
+                },
+                initialStatus = "Sent (waiting ACK)",
+            )
+        }
+    }
+
+    /**
      * Serializes one classic PebbleKit send through the [Mutex], executed on [Dispatchers.IO].
      *
      * Unlike a plain fire-and-forget [PebbleKit.sendDataToPebble] (which routes through
@@ -533,9 +567,16 @@ class PebbleCommunicationManager {
      */
     private suspend fun armAndBroadcast(channel: SyncChannel) {
         val pending = pendingSends[channel] ?: return
-        val label = if (channel == SyncChannel.ALARM) "alarm-sync" else "calendar-sync"
-        val transactionId =
-            if (channel == SyncChannel.ALARM) ALARM_TRANSACTION_ID else CALENDAR_TRANSACTION_ID
+        val label = when (channel) {
+            SyncChannel.ALARM -> "alarm-sync"
+            SyncChannel.CALENDAR -> "calendar-sync"
+            SyncChannel.TIMER -> "timer-sync"
+        }
+        val transactionId = when (channel) {
+            SyncChannel.ALARM -> ALARM_TRANSACTION_ID
+            SyncChannel.CALENDAR -> CALENDAR_TRANSACTION_ID
+            SyncChannel.TIMER -> TIMER_TRANSACTION_ID
+        }
         // Arm before (re)broadcast (single-flight ordering; see scheduleTimeout).
         scheduleTimeout(channel)
         performSend(pending.context, pending.buildDict(), label, transactionId)
@@ -660,6 +701,7 @@ class PebbleCommunicationManager {
          */
         private const val ALARM_TRANSACTION_ID = 1
         private const val CALENDAR_TRANSACTION_ID = 2
+        private const val TIMER_TRANSACTION_ID = 3
 
         /**
          * ACK/NACK timeout window: if neither an ACK nor a NACK arrives for a sent transaction within

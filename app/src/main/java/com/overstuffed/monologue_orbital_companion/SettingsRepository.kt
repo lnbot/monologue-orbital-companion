@@ -30,6 +30,7 @@ class SettingsRepository(private val context: Context) {
     private object Keys {
         val AlarmSyncEnabled = booleanPreferencesKey("alarm_sync_enabled")
         val CalendarSyncEnabled = booleanPreferencesKey("calendar_sync_enabled")
+        val TimerSyncEnabled = booleanPreferencesKey("timer_sync_enabled")
         val SelectedCalendarIds = stringSetPreferencesKey("selected_calendar_ids")
     }
 
@@ -40,6 +41,10 @@ class SettingsRepository(private val context: Context) {
     /** Whether calendar syncing is enabled. Defaults to `false` when never set. */
     val calendarSyncEnabled: Flow<Boolean> =
         context.dataStore.data.map { it[Keys.CalendarSyncEnabled] ?: false }
+
+    /** Whether timer syncing is enabled. Defaults to `false` when never set. */
+    val timerSyncEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[Keys.TimerSyncEnabled] ?: false }
 
     /**
      * The set of calendar IDs (as strings) the user has explicitly selected.
@@ -67,6 +72,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setCalendarSyncEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.CalendarSyncEnabled] = enabled }
+    }
+
+    suspend fun setTimerSyncEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.TimerSyncEnabled] = enabled }
     }
 
     suspend fun setSelectedCalendarIds(ids: Set<String>) {

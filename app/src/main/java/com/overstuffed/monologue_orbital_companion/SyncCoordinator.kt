@@ -59,6 +59,9 @@ object SyncCoordinator {
     var calendarMonitor: CalendarMonitor? = null
         private set
 
+    var timerMonitor: TimerMonitor? = null
+        private set
+
     private var appContext: Context? = null
 
     private val _alarmSyncEnabled = MutableStateFlow(false)
@@ -70,6 +73,11 @@ object SyncCoordinator {
 
     /** Whether calendar syncing is currently active (reactive — UI collects this). */
     val calendarSyncEnabled: StateFlow<Boolean> = _calendarSyncEnabled.asStateFlow()
+
+    private val _timerSyncEnabled = MutableStateFlow(false)
+
+    /** Whether timer syncing is currently active (reactive — UI collects this). */
+    val timerSyncEnabled: StateFlow<Boolean> = _timerSyncEnabled.asStateFlow()
 
     /** Backing store for persisted settings (created during [initialize]). */
     private var settingsRepository: SettingsRepository? = null
@@ -97,12 +105,13 @@ object SyncCoordinator {
         pebbleCommunicationManager = manager
         alarmMonitor = AlarmMonitor(appContext!!, manager)
         calendarMonitor = CalendarMonitor(appContext!!, manager)
+        timerMonitor = TimerMonitor(appContext!!, manager)
         // Start listening for incoming messages from the watch via classic PebbleKit broadcast,
         // and for the watch's ACK/NACK confirmations of our outgoing sends. All Pebble broadcast
         // receivers are registered here in one place so their lifecycles stay consistent.
         PebbleListenerService.register(appContext!!)
         manager.registerAckNackReceivers(appContext!!)
-        Log.i(TAG, "initialize: SyncCoordinator ready (AlarmMonitor + CalendarMonitor created).")
+        Log.i(TAG, "initialize: SyncCoordinator ready (AlarmMonitor + CalendarMonitor + TimerMonitor created).")
         loadPersistedSettings()
     }
 
@@ -120,14 +129,16 @@ object SyncCoordinator {
             try {
                 val alarmEnabled = repo.alarmSyncEnabled.first()
                 val calendarEnabled = repo.calendarSyncEnabled.first()
+                val timerEnabled = repo.timerSyncEnabled.first()
                 if (repo.wasCalendarSelectionStored()) {
                     calendarMonitor?.applyPersistedSelection(repo.selectedCalendarIds.first())
                 }
                 applyAlarmSyncEnabled(alarmEnabled)
                 applyCalendarSyncEnabled(calendarEnabled)
+                applyTimerSyncEnabled(timerEnabled)
                 Log.i(
                     TAG,
-                    "loadPersistedSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled.",
+                    "loadPersistedSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled, timer=$timerEnabled.",
                 )
                 // Persisted settings are now authoritative — start/stop the sync service to match.
                 updateServiceState()
@@ -147,6 +158,12 @@ object SyncCoordinator {
     private fun applyCalendarSyncEnabled(enabled: Boolean) {
         calendarMonitor?.enabled = enabled
         _calendarSyncEnabled.value = enabled
+    }
+
+    /** Updates in-memory timer state (and its flow) without persisting — used when loading. */
+    private fun applyTimerSyncEnabled(enabled: Boolean) {
+        timerMonitor?.enabled = enabled
+        _timerSyncEnabled.value = enabled
     }
 
     /** Best-effort, async persistence. Failures are logged and never propagated to the caller. */
@@ -172,7 +189,7 @@ object SyncCoordinator {
      */
     private fun updateServiceState() {
         val ctx = appContext ?: return
-        if (isAlarmSyncEnabled() || isCalendarSyncEnabled()) {
+        if (isAlarmSyncEnabled() || isCalendarSyncEnabled() || isTimerSyncEnabled()) {
             SyncService.start(ctx)
         } else {
             SyncService.stop(ctx)
@@ -225,6 +242,30 @@ object SyncCoordinator {
 
     /** Whether calendar syncing is currently active. */
     fun isCalendarSyncEnabled(): Boolean = calendarMonitor?.enabled == true
+
+    // ---------------------------------------------------------------
+    // Timer sync
+    // ---------------------------------------------------------------
+
+    /**
+     * Enables or disables timer syncing. When enabling, the [TimerMonitor] registers as the
+     * [ClockTimerNotificationListener] callback and performs an initial read + send; when disabling
+     * it unregisters the callback and stops sending.
+     */
+    fun setTimerSyncEnabled(enabled: Boolean) {
+        val monitor = timerMonitor
+        if (monitor == null) {
+            Log.w(TAG, "setTimerSyncEnabled($enabled): TimerMonitor not initialized; call initialize(context) first.")
+            return
+        }
+        monitor.enabled = enabled
+        _timerSyncEnabled.value = enabled
+        persist { it.setTimerSyncEnabled(enabled) }
+        updateServiceState()
+    }
+
+    /** Whether timer syncing is currently active. */
+    fun isTimerSyncEnabled(): Boolean = timerMonitor?.enabled == true
 
     /**
      * Returns the list of currently visible system calendars with their selected state.
@@ -282,6 +323,9 @@ object SyncCoordinator {
             }
         }
 
+        // Timer sync is a re-read of the currently active timer when enabled.
+        timerMonitor?.syncCurrentTimer()
+
         onSyncRequested?.invoke()
             ?: Log.d(TAG, "requestSync: no onSyncRequested hook set; skipping.")
     }
@@ -294,6 +338,7 @@ object SyncCoordinator {
     fun shutdown() {
         alarmMonitor?.cleanup()
         calendarMonitor?.cleanup()
+        timerMonitor?.cleanup()
         pebbleCommunicationManager?.unregisterAckNackReceivers()
         PebbleListenerService.unregister(appContext ?: return)
         pebbleCommunicationManager?.close()
@@ -302,10 +347,12 @@ object SyncCoordinator {
         settingsRepository = null
         _alarmSyncEnabled.value = false
         _calendarSyncEnabled.value = false
+        _timerSyncEnabled.value = false
         initialized = false
         appContext = null
         alarmMonitor = null
         calendarMonitor = null
+        timerMonitor = null
         pebbleCommunicationManager = null
         Log.i(TAG, "shutdown: SyncCoordinator released.")
     }

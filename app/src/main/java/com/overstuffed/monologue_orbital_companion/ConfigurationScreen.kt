@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
@@ -90,10 +91,15 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     // Controls the "Cannot Sync" dialog shown when the user taps "Sync Now" while no watch is connected.
     var showCannotSyncDialog by remember { mutableStateOf(false) }
 
+    // Controls the "Notification access needed" dialog shown when the user enables Timer sync
+    // without first granting notification-read access to this app.
+    var showNotificationAccessDialog by remember { mutableStateOf(false) }
+
     // Reactive sync-enabled state collected from the coordinator, which is populated from
     // DataStore during initialize(). Toggles update automatically when persisted values load.
     val alarmSyncEnabled by SyncCoordinator.alarmSyncEnabled.collectAsState()
     val calendarSyncEnabled by SyncCoordinator.calendarSyncEnabled.collectAsState()
+    val timerSyncEnabled by SyncCoordinator.timerSyncEnabled.collectAsState()
     var calendars by remember { mutableStateOf(SyncCoordinator.getAvailableCalendars()) }
 
     // Reactive transmit status from the shared manager (null-safe; defaults shown until a manager exists).
@@ -102,6 +108,11 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         ?.collectAsState(initial = ChannelSyncStatus())
         ?: remember { mutableStateOf(ChannelSyncStatus()) }
     val calendarSyncStatus by manager?.calendarSyncStatus
+        ?.collectAsState(initial = ChannelSyncStatus())
+        ?: remember { mutableStateOf(ChannelSyncStatus()) }
+
+    // Reactive transmit status for the timer channel (mirrors alarm/calendar).
+    val timerSyncStatus by manager?.timerSyncStatus
         ?.collectAsState(initial = ChannelSyncStatus())
         ?: remember { mutableStateOf(ChannelSyncStatus()) }
 
@@ -236,6 +247,26 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    fun onTimerToggle(checked: Boolean) {
+        Log.i(TAG, "UI: timer sync toggle -> $checked")
+        if (checked) {
+            maybeRequestNotificationPermission()
+            // Reading timer data requires notification-listener access. If it is not granted we do
+            // not enable the toggle — instead we prompt the user to open Notification access
+            // settings, and the sync activates once they toggle it back on (granted).
+            if (SyncCoordinator.timerMonitor?.checkNotificationAccess(context) == true) {
+                Log.i(TAG, "Notification access granted; enabling timer sync.")
+                SyncCoordinator.setTimerSyncEnabled(true)
+            } else {
+                Log.w(TAG, "Timer sync requires notification access; showing guidance dialog.")
+                showNotificationAccessDialog = true
+            }
+        } else {
+            SyncCoordinator.setTimerSyncEnabled(false)
+            Log.i(TAG, "Timer sync disabled.")
+        }
+    }
+
     // Re-fetch the calendar list whenever calendar sync becomes enabled (including after the async
     // DataStore load on relaunch), so persisted per-calendar selections show up.
     LaunchedEffect(calendarSyncEnabled) {
@@ -305,6 +336,14 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
                 icon = { Icon(Icons.Rounded.CalendarMonth, contentDescription = null) },
                 checked = calendarSyncEnabled,
                 onCheckedChange = ::onCalendarToggle,
+            )
+
+            SwitchRow(
+                title = "Sync Timer",
+                subtitle = "Push the active timer's end time to the watchface (needs notification access).",
+                icon = { Icon(Icons.Rounded.Timer, contentDescription = null) },
+                checked = timerSyncEnabled,
+                onCheckedChange = ::onTimerToggle,
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
@@ -400,6 +439,9 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
                 appendLine()
                 appendLine("  Last transmit: ${calendarSyncStatus.lastTransmitStatus ?: "—"}")
                 appendLine("  Last successful sync: ${formatSyncTime(calendarSyncStatus.lastSuccessfulSyncTime)}")
+                appendLine("Timer sync: ${if (timerSyncEnabled) "Enabled" else "Disabled"}")
+                appendLine("  Last transmit: ${timerSyncStatus.lastTransmitStatus ?: "—"}")
+                appendLine("  Last successful sync: ${formatSyncTime(timerSyncStatus.lastSuccessfulSyncTime)}")
                 append("Last sync request from watch: ${formatSyncTime(lastWatchSyncRequestTime)}")
             }
             Row(
@@ -436,6 +478,45 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
             confirmButton = {
                 TextButton(onClick = { showCannotSyncDialog = false }) {
                     Text("OK")
+                }
+            },
+        )
+    }
+
+    // "Notification access needed" dialog: shown when the user enables Timer sync without
+    // notification-read access. Directs them to the system Notification access settings;
+    // sync activates once they re-toggle Timer sync after granting access.
+    if (showNotificationAccessDialog) {
+        AlertDialog(
+            onDismissRequest = { showNotificationAccessDialog = false },
+            title = { Text("Notification access needed") },
+            text = {
+                Text(
+                    "Timer sync reads timer notifications from your clock app. " +
+                        "Please enable \"Monologue Orbital Companion\" in Notification access " +
+                        "settings, then turn Timer sync back on.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showNotificationAccessDialog = false
+                        try {
+                            context.startActivity(
+                                Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS),
+                            )
+                            Log.i(TAG, "Opened notification listener settings.")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "No activity for notification listener settings.", e)
+                        }
+                    },
+                ) {
+                    Text("Open Settings")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNotificationAccessDialog = false }) {
+                    Text("Cancel")
                 }
             },
         )
