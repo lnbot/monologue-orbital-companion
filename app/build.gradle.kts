@@ -74,6 +74,7 @@ dependencies {
     implementation(libs.moshi.kotlin)
     implementation(libs.okhttp)
     implementation("com.getpebble:pebblekit:4.0.1@aar")
+    implementation(libs.io.rebble.pebblekit2.client)
     implementation(libs.play.services.location)
     implementation(libs.retrofit)
     testImplementation(libs.androidx.core)

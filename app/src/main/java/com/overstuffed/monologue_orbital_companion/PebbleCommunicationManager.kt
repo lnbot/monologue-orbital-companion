@@ -4,11 +4,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.net.Uri
 import android.os.Build
 import android.util.Log
 import com.getpebble.android.kit.Constants
 import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
+import io.rebble.pebblekit2.client.DefaultPebbleInfoRetriever
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -21,6 +23,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -131,6 +134,14 @@ class PebbleCommunicationManager {
     // ------------------------------------------------------------------
     // ACK/NACK receiver lifecycle
     // ------------------------------------------------------------------
+
+    /**
+     * Lazily-created single PebbleKit Android 2 (PK2) info retriever used for the connectivity check in
+     * [isWatchConnected]. [DefaultPebbleInfoRetriever] is stateless (it just holds a Context and delegates
+     * app discovery to the process-singleton `DefaultPebbleAndroidAppPicker`), has no `close()`/`dispose()`,
+     * and is safe to reuse for the whole manager lifetime — so it is created once on first use.
+     */
+    private var pk2InfoRetriever: DefaultPebbleInfoRetriever? = null
 
     private var appContext: Context? = null
     private var ackReceiver: BroadcastReceiver? = null
@@ -365,74 +376,48 @@ class PebbleCommunicationManager {
     /**
      * Returns whether a Pebble/Rebble watch is currently connected.
      *
-     * This is a Kotlin port of the legacy PebbleKit `PebbleKit.isWatchConnected(Context)` check,
-     * which queries the **state content providers** exposed by the Pebble app: the basalt authority
-     * (`content://com.getpebble.android.provider.basalt/state`) first, then the primary authority
-     * (`content://com.getpebble.android.provider/state`). Both are re-exposed by Core Devices
-     * (`coredevices.coreapp`). Unlike the classic broadcast-based path, this provider query works
-     * reliably on Android 14+ (API 34+) where PebbleKit's internal `registerReceiver(null, ...)`
-     * call throws [IllegalArgumentException].
+     * **Primary path — PebbleKit Android 2.** Uses [DefaultPebbleInfoRetriever.getConnectedWatches] (from
+     * `io.rebble.pebblekit2:client`) when the library is present. PK2 resolves the installed Pebble mobile app
+     * (typically Core Devices, `coredevices.coreapp`) through `DefaultPebbleAndroidAppPicker` (a
+     * `queryIntentServices` on the `io.rebble.pebblekit2.SEND_DATA_TO_WATCH` intent), then queries its
+     * `content://<app-package>.pebblekit/connectedWatches` content provider and maps each row to a
+     * [io.rebble.pebblekit2.model.ConnectedWatch]; a non-empty list means at least one watch is connected.
+     * If no Pebble mobile app is installed / reachable the flow simply emits an empty list — it does not crash —
+     * and we fall through to the legacy provider query below. Any exception is caught and logged, also falling
+     * through to the legacy path.
+     *
+     * **Fallback path — legacy PebbleKit state provider.** This is the Kotlin port of the legacy
+     * `PebbleKit.isWatchConnected(Context)` check, which queries the **state content providers** exposed by the
+     * Pebble app: the basalt authority (`content://com.getpebble.android.provider.basalt/state`) first, then the
+     * primary authority (`content://com.getpebble.android.provider/state`). Both are re-exposed by Core Devices
+     * (`coredevices.coreapp`). Unlike the classic broadcast-based path, this provider query works reliably on
+     * Android 14+ (API 34+) where PebbleKit's internal `registerReceiver(null, ...)` call throws
+     * [IllegalArgumentException].
      *
      * Row 0 of the state table is the "connected" flag: `1` = connected, `0` = not connected.
      *
-     * Every failure (no provider installed, [SecurityException], [IllegalArgumentException], etc.)
-     * is logged and yields false — this method never crashes.
+     * Every failure (no provider installed, [SecurityException], [IllegalArgumentException], etc.) is logged and
+     * yields false — this method never crashes. The path that actually succeeded (PK2 vs legacy) is logged for
+     * diagnosis.
      */
-    suspend fun isWatchConnected(context: Context): Boolean {
-        return true;
-//        return withContext(Dispatchers.IO) {
-//            try {
-//                // Path 1: basalt state provider (the authority modern Core Devices re-exposes).
-//                val basaltCursor = context.contentResolver.query(
-//                    Uri.parse(LEGACY_PROVIDER_BASALT), null, null, null, null,
-//                )
-//                if (basaltCursor != null) {
-//                    try {
-//                        if (basaltCursor.moveToFirst()) {
-//                            val connected =
-//                                basaltCursor.getInt(LEGACY_STATE_COLUMN_CONNECTED) == 1
-//                            Log.d(
-//                                TAG,
-//                                "isWatchConnected: basalt=" +
-//                                    if (connected) "connected" else "not connected",
-//                            )
-//                            if (connected) return@withContext true
-//                        }
-//                    } finally {
-//                        basaltCursor.close()
-//                    }
-//                }
-//
-//                // Path 2: primary state provider.
-//                val primaryCursor = context.contentResolver.query(
-//                    Uri.parse(LEGACY_PROVIDER_PRIMARY), null, null, null, null,
-//                )
-//                if (primaryCursor != null) {
-//                    try {
-//                        if (primaryCursor.moveToFirst()) {
-//                            val connected =
-//                                primaryCursor.getInt(LEGACY_STATE_COLUMN_CONNECTED) == 1
-//                            Log.d(
-//                                TAG,
-//                                "isWatchConnected: primary=" +
-//                                    if (connected) "connected" else "not connected",
-//                            )
-//                            return@withContext connected
-//                        }
-//                        Log.d(TAG, "isWatchConnected: primary=no rows -> not connected")
-//                        return@withContext false
-//                    } finally {
-//                        primaryCursor.close()
-//                    }
-//                }
-//
-//                Log.d(TAG, "isWatchConnected: not connected (no provider answered)")
-//                false
-//            } catch (e: Exception) {
-//                Log.e(TAG, "isWatchConnected: provider query failed: ${e.message}", e)
-//                false
-//            }
-//        }
+    suspend fun isWatchConnected(context: Context): Boolean = withContext(Dispatchers.IO) {
+        // Primary path: PebbleKit Android 2 connectivity check.
+        try {
+            val retriever = pk2InfoRetriever
+                ?: DefaultPebbleInfoRetriever(context.applicationContext).also {
+                    pk2InfoRetriever = it
+                }
+            val watches = retriever.getConnectedWatches().first()
+            Log.d(TAG, "isWatchConnected: PebbleKit2 reports ${watches.size} connected watch(es)")
+            if (watches.isNotEmpty()) {
+                Log.d(TAG, "isWatchConnected: connected via PebbleKit2 path")
+                return@withContext true
+            }
+            Log.d(TAG, "isWatchConnected: PebbleKit2 reports no connected watch; trying legacy fallback")
+        } catch (e: Exception) {
+            Log.e(TAG, "isWatchConnected: PebbleKit2 connectivity check failed: ${e.message}", e)
+        }
+        return@withContext false
     }
 
     /**
@@ -640,6 +625,7 @@ class PebbleCommunicationManager {
 
     /** Cancels the background coroutine scope, any pending timers, and unregisters the receivers. */
     fun close() {
+        pk2InfoRetriever = null
         unregisterAckNackReceivers()
         // Cancel + clear any outstanding per-channel ACK timeout timers to avoid leaks.
         timeoutJobs.values.forEach { it.cancel() }
