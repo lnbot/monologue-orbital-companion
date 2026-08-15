@@ -2,7 +2,11 @@ package com.overstuffed.monologue_orbital_companion
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.provider.Settings
+import android.os.Build
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +28,7 @@ import androidx.compose.material.icons.rounded.CalendarMonth
 import androidx.compose.material.icons.rounded.CloudSync
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -33,10 +38,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -75,6 +83,12 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Guards against re-launching the POST_NOTIFICATIONS dialog after permanent denial.
+    var notificationPermissionPermanentlyDenied by remember { mutableStateOf(false) }
+
+    // Controls the "Cannot Sync" dialog shown when the user taps "Sync Now" while no watch is connected.
+    var showCannotSyncDialog by remember { mutableStateOf(false) }
 
     // Reactive sync-enabled state collected from the coordinator, which is populated from
     // DataStore during initialize(). Toggles update automatically when persisted values load.
@@ -123,10 +137,80 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // Launcher for the POST_NOTIFICATIONS runtime permission (API 33+). Requested the first time
+    // the user enables either sync so the persistent foreground-service notification is visible
+    // in the shade. If denied, syncing still works — the notification is simply hidden.
+    @Suppress("InlinedApi")
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            Log.i(TAG, "POST_NOTIFICATIONS permission granted.")
+            // If a sync feature is running, re-post the foreground notification now that the
+            // permission is available. SyncService.start() is idempotent — if the service is
+            // already running the intent is re-delivered to onStartCommand, which re-posts the
+            // notification in the shade.
+            if (SyncCoordinator.isAlarmSyncEnabled() || SyncCoordinator.isCalendarSyncEnabled()) {
+                SyncService.start(context.applicationContext)
+                Log.i(TAG, "POST_NOTIFICATIONS granted; re-started SyncService to re-post notification.")
+            }
+        } else {
+            val activity = context as? Activity
+            val permanentlyDenied = activity?.let {
+                !it.shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)
+            } ?: false
+            if (permanentlyDenied) {
+                notificationPermissionPermanentlyDenied = true
+            }
+            val message = if (permanentlyDenied) {
+                "Notification permission was permanently denied. Grant it in system Settings to see sync notifications."
+            } else {
+                "Notification permission is needed to show the sync status in the notification shade."
+            }
+            Log.w(TAG, "POST_NOTIFICATIONS permission denied. permanentlyDenied=$permanentlyDenied")
+            scope.launch {
+                if (permanentlyDenied) {
+                    val result = snackbarHostState.showSnackbar(
+                        message = message,
+                        actionLabel = "Open Settings",
+                        duration = SnackbarDuration.Long,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = Uri.fromParts("package", context.packageName, null)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(intent)
+                    }
+                } else {
+                    snackbarHostState.showSnackbar(message)
+                }
+            }
+        }
+    }
+
+    /** Requests POST_NOTIFICATIONS on API 33+ if it has not been granted yet. Silently skips if
+     * the user has permanently denied the permission (checked via a flag set in the launcher
+     * callback), avoiding the system auto-deny loop. */
+    fun maybeRequestNotificationPermission() {
+        if (notificationPermissionPermanentlyDenied) {
+            Log.w(TAG, "POST_NOTIFICATIONS permanently denied; skipping dialog launch.")
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            Log.i(TAG, "Requesting POST_NOTIFICATIONS permission.")
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
     fun onAlarmToggle(checked: Boolean) {
         Log.i(TAG, "UI: alarm sync toggle -> $checked")
         SyncCoordinator.setAlarmSyncEnabled(checked)
         if (checked) {
+            maybeRequestNotificationPermission()
             Log.i(TAG, "Alarm sync enabled.")
         } else {
             Log.i(TAG, "Alarm sync disabled.")
@@ -136,6 +220,7 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     fun onCalendarToggle(checked: Boolean) {
         Log.i(TAG, "UI: calendar sync toggle -> $checked")
         if (checked) {
+            maybeRequestNotificationPermission()
             if (calendarPermissionGranted) {
                 Log.i(TAG, "Calendar permission already granted; enabling calendar sync.")
                 SyncCoordinator.setCalendarSyncEnabled(true)
@@ -170,8 +255,17 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
     fun onForceSync() {
         Log.i(TAG, "Force sync button pressed; requesting sync.")
         scope.launch {
-            SyncCoordinator.requestSync()
-            snackbarHostState.showSnackbar("Sync requested.")
+            val connected = SyncCoordinator.pebbleCommunicationManager
+                ?.isWatchConnected(context) ?: false
+            Log.i(TAG, "Force sync: watch connected = $connected")
+            if (connected) {
+                Log.i(TAG, "Force sync triggered (watch connected).")
+                SyncCoordinator.requestSync()
+                snackbarHostState.showSnackbar("Sync requested.")
+            } else {
+                Log.w(TAG, "Cannot sync: showing dialog.")
+                showCannotSyncDialog = true
+            }
         }
     }
 
@@ -328,6 +422,24 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    // "Cannot Sync" dialog: shown when the user taps "Sync Now" while no watch is connected.
+    if (showCannotSyncDialog) {
+        AlertDialog(
+            onDismissRequest = { showCannotSyncDialog = false },
+            title = { Text("Cannot Sync") },
+            text = {
+                Text(
+                    "Your watch is not connected. Please make sure your Pebble is connected " +
+                        "and try again.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showCannotSyncDialog = false }) {
+                    Text("OK")
+                }
+            },
+        )
+    }
 }
 
 /**

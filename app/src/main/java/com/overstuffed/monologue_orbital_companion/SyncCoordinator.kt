@@ -97,8 +97,11 @@ object SyncCoordinator {
         pebbleCommunicationManager = manager
         alarmMonitor = AlarmMonitor(appContext!!, manager)
         calendarMonitor = CalendarMonitor(appContext!!, manager)
-        // Start listening for incoming messages from the watch via classic PebbleKit broadcast.
+        // Start listening for incoming messages from the watch via classic PebbleKit broadcast,
+        // and for the watch's ACK/NACK confirmations of our outgoing sends. All Pebble broadcast
+        // receivers are registered here in one place so their lifecycles stay consistent.
         PebbleListenerService.register(appContext!!)
+        manager.registerAckNackReceivers(appContext!!)
         Log.i(TAG, "initialize: SyncCoordinator ready (AlarmMonitor + CalendarMonitor created).")
         loadPersistedSettings()
     }
@@ -126,6 +129,8 @@ object SyncCoordinator {
                     TAG,
                     "loadPersistedSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled.",
                 )
+                // Persisted settings are now authoritative — start/stop the sync service to match.
+                updateServiceState()
             } catch (e: Exception) {
                 Log.e(TAG, "loadPersistedSettings: failed to load persisted settings.", e)
             }
@@ -158,6 +163,22 @@ object SyncCoordinator {
         }
     }
 
+    /**
+     * Starts or stops the foreground [SyncService] based on whether any sync feature is enabled.
+     *
+     * The service runs only while alarm OR calendar syncing is on, and is stopped when both are
+     * off. Safe to call repeatedly — starting an already-running service merely re-posts the
+     * notification, and stopping a non-running service is a no-op.
+     */
+    private fun updateServiceState() {
+        val ctx = appContext ?: return
+        if (isAlarmSyncEnabled() || isCalendarSyncEnabled()) {
+            SyncService.start(ctx)
+        } else {
+            SyncService.stop(ctx)
+        }
+    }
+
     // ---------------------------------------------------------------
     // Alarm sync
     // ---------------------------------------------------------------
@@ -175,6 +196,7 @@ object SyncCoordinator {
         monitor.enabled = enabled
         _alarmSyncEnabled.value = enabled
         persist { it.setAlarmSyncEnabled(enabled) }
+        updateServiceState()
     }
 
     /** Whether alarm syncing is currently active. */
@@ -198,6 +220,7 @@ object SyncCoordinator {
         monitor.enabled = enabled
         _calendarSyncEnabled.value = enabled
         persist { it.setCalendarSyncEnabled(enabled) }
+        updateServiceState()
     }
 
     /** Whether calendar syncing is currently active. */
@@ -271,6 +294,7 @@ object SyncCoordinator {
     fun shutdown() {
         alarmMonitor?.cleanup()
         calendarMonitor?.cleanup()
+        pebbleCommunicationManager?.unregisterAckNackReceivers()
         PebbleListenerService.unregister(appContext ?: return)
         pebbleCommunicationManager?.close()
         syncScope?.cancel()

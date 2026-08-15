@@ -4,7 +4,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.READ_CALENDAR" />
 
+    <!-- Foreground service (connectedDevice type): required to run the persistent sync service. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Runtime permission on API 33+ so the persistent sync notification is visible. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Qualifying permission for the connectedDevice FGS type on API 34+ (lets the service start
+         from the background without a runtime Bluetooth permission prompt). Normal permission —
+         granted automatically at install time. -->
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+
     <application
+        android:name=".MonologueApplication"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -25,6 +36,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Background sync keeps running while alarm or calendar syncing is enabled. -->
+        <service
+            android:name=".SyncService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
     </application>
 
 </manifest>

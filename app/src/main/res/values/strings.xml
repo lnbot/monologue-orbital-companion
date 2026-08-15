@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">monologue-orbital-companion</string>
+
+    <!-- Foreground sync service notification -->
+    <string name="sync_service_notification_title">Monologue Orbital Companion</string>
+    <string name="sync_service_notification_text">Syncing alarm &amp; calendar to watch</string>
+    <string name="sync_service_channel_name">Sync Service</string>
+    <string name="sync_service_channel_description">Shows a persistent notification while alarm or calendar syncing is active.</string>
 </resources>

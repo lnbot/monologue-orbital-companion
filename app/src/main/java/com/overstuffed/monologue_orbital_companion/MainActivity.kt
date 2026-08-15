@@ -17,9 +17,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize the singleton sync coordinator with the application context so it outlives
-        // this Activity. Idempotent — safe to call on every creation.
-        SyncCoordinator.initialize(applicationContext)
+        // SyncCoordinator is initialized once by MonologueApplication for the lifetime of the
+        // process, so background sync (alarm receiver, calendar observer, Pebble listener) keeps
+        // running even when this Activity is destroyed. Nothing to do here.
 
         enableEdgeToEdge()
 
@@ -28,11 +28,6 @@ class MainActivity : ComponentActivity() {
                 MonologueNavHost()
             }
         }
-    }
-
-    override fun onDestroy() {
-        SyncCoordinator.shutdown()
-        super.onDestroy()
     }
 }
 
