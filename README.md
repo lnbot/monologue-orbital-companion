@@ -1,0 +1,1 @@
+Companion app for the [monologue-orbital](https://github.com/lnbot/monologue-orbital) Pebble watchface.  Can sync alarms, timers, and calendar events to be displayed on the watchface, and optionally posted as timeline pins.
