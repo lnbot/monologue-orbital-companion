@@ -5,8 +5,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -116,14 +116,15 @@ class AlarmMonitor(
     private fun registerReceiver() {
         val filter = IntentFilter(AlarmManager.ACTION_NEXT_ALARM_CLOCK_CHANGED)
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // The alarm-changed broadcast is sent by the system, so the receiver does not need to
-                // be exported to other apps (required flag semantics on API 33+).
-                appContext.registerReceiver(alarmChangedReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                @Suppress("DEPRECATION")
-                appContext.registerReceiver(alarmChangedReceiver, filter)
-            }
+            // The alarm-changed broadcast is sent by the system, so the receiver does not need to
+            // be exported to other apps (ContextCompat.registerReceiver applies
+            // RECEIVER_NOT_EXPORTED).
+            ContextCompat.registerReceiver(
+                appContext,
+                alarmChangedReceiver,
+                filter,
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
             receiverRegistered = true
             Log.d(TAG, "Registered receiver for ACTION_NEXT_ALARM_CLOCK_CHANGED.")
         } catch (e: Exception) {

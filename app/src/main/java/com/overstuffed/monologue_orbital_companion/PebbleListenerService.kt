@@ -4,8 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import com.getpebble.android.kit.util.PebbleDictionary
 import java.util.UUID
 
@@ -41,10 +42,13 @@ object PebbleListenerService {
     private const val EXTRA_UUID = "uuid"
 
     /**
-     * Extra key for the incoming [PebbleDictionary] in the broadcast.
-     * Value type: [PebbleDictionary] (Serializable).
+     * Extra key for the incoming AppMessage data in the broadcast.
+     *
+     * The Pebble Core app delivers the dictionary as a **String** whose value is the JSON
+     * serialization of the message (e.g. `[{"key":110,"type":"uint","length":4,"value":1}]`),
+     * so it must be decoded via [PebbleDictionary.fromJson] before use.
      */
-    private const val EXTRA_DATA = "data"
+    private const val EXTRA_DATA = "msg_data"
 
     private var receiver: BroadcastReceiver? = null
     private var isRegistered = false
@@ -69,14 +73,14 @@ object PebbleListenerService {
             }
         }
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // On API 33+ we must explicitly declare the receiver's exported state.
-                // RECEIVER_EXPORTED because the Pebble Core app (a separate app) sends this broadcast.
-                appContext.registerReceiver(receiver, intentFilter, Context.RECEIVER_EXPORTED)
-            } else {
-                @Suppress("DEPRECATION")
-                appContext.registerReceiver(receiver, intentFilter)
-            }
+            // RECEIVER_EXPORTED because the Pebble Core app (a separate app) sends this broadcast
+            // (ContextCompat.registerReceiver applies the exported flag on all API levels).
+            ContextCompat.registerReceiver(
+                appContext,
+                receiver,
+                intentFilter,
+                ContextCompat.RECEIVER_EXPORTED,
+            )
             isRegistered = true
             Log.i(TAG, "register: PebbleListenerService receiver registered.")
         } catch (e: Exception) {
@@ -114,21 +118,26 @@ object PebbleListenerService {
      * Extracts the UUID and [PebbleDictionary] from the intent extras and dispatches sync requests.
      */
     private fun handleReceive(intent: Intent) {
-        val uuid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getSerializableExtra(EXTRA_UUID, UUID::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getSerializableExtra(EXTRA_UUID) as? UUID
+        val uuid = IntentCompat.getSerializableExtra(intent, EXTRA_UUID, UUID::class.java)
+
+        // The Pebble Core app broadcasts the message data as a String (the JSON serialization of
+        // the PebbleDictionary), not as a PebbleDictionary object, so we read it as a raw string
+        // and decode it before use.
+        val json = intent.getStringExtra(EXTRA_DATA)
+
+        if (uuid == null || json.isNullOrBlank()) {
+            Log.w(TAG, "handleReceive: received broadcast with null uuid or data.")
+            return
         }
 
-        // PebbleDictionary is stored as a Serializable extra. On API 33+ the typed overload
-        // requires the class to conform to Serializable, but the compiler may not see
-        // PebbleDictionary's Serializable hierarchy, so we use the raw approach with a cast.
-        @Suppress("DEPRECATION")
-        val data = intent.getSerializableExtra(EXTRA_DATA) as? PebbleDictionary
+        val data: PebbleDictionary? = try {
+            PebbleDictionary.fromJson(json)
+        } catch (e: Exception) {
+            Log.e(TAG, "handleReceive: failed to decode message data: ${e.message}", e)
+            null
+        }
 
-        if (uuid == null || data == null) {
-            Log.w(TAG, "handleReceive: received broadcast with null uuid or data.")
+        if (data == null) {
             return
         }
 

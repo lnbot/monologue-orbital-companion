@@ -5,8 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.net.Uri
-import android.os.Build
 import android.util.Log
+import androidx.core.content.ContextCompat
+import androidx.core.content.IntentCompat
 import com.getpebble.android.kit.Constants
 import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
@@ -183,18 +184,19 @@ class PebbleCommunicationManager {
         }
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // Exported: the Pebble / Core Devices app (a separate app) sends these broadcasts.
-                appContext.registerReceiver(ackReceiver, ackFilter, Context.RECEIVER_EXPORTED)
-                appContext.registerReceiver(nackReceiver, nackFilter, Context.RECEIVER_EXPORTED)
-            } else {
-                // Pre-API-33 registration has no exported flag; the receiver is implicitly exported
-                // for these unprotected broadcasts (same pattern as PebbleListenerService).
-                @Suppress("DEPRECATION", "UnspecifiedRegisterReceiverFlag")
-                appContext.registerReceiver(ackReceiver, ackFilter)
-                @Suppress("DEPRECATION", "UnspecifiedRegisterReceiverFlag")
-                appContext.registerReceiver(nackReceiver, nackFilter)
-            }
+            // Exported: the Pebble / Core Devices app (a separate app) sends these broadcasts.
+            ContextCompat.registerReceiver(
+                appContext,
+                ackReceiver,
+                ackFilter,
+                ContextCompat.RECEIVER_EXPORTED,
+            )
+            ContextCompat.registerReceiver(
+                appContext,
+                nackReceiver,
+                nackFilter,
+                ContextCompat.RECEIVER_EXPORTED,
+            )
             ackNackRegistered = true
             Log.i(TAG, "registerAckNackReceivers: ACK/NACK receivers registered.")
         } catch (e: Exception) {
@@ -322,16 +324,12 @@ class PebbleCommunicationManager {
         }
 
     /**
-     * Reads the `uuid` extra with the API-32/33-safe typed overload, falling back to the raw
-     * read on older platforms (same approach as [PebbleListenerService]).
+     * Reads the `uuid` extra via [IntentCompat.getSerializableExtra], the API-safe typed
+     * Serializable read that works on all platforms (and avoids the buggy API 33
+     * implementation, b/232589966).
      */
     private fun readUuidExtra(intent: Intent): UUID? =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent.getSerializableExtra(Constants.APP_UUID, UUID::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent.getSerializableExtra(Constants.APP_UUID) as? UUID
-        }
+        IntentCompat.getSerializableExtra(intent, Constants.APP_UUID, UUID::class.java)
 
     /**
      * Tries to surface an error code from a NACK broadcast.
@@ -381,7 +379,7 @@ class PebbleCommunicationManager {
     /**
      * Returns whether a Pebble/Rebble watch is currently connected.
      *
-     * **Primary path — PebbleKit Android 2.** Uses [DefaultPebbleInfoRetriever.getConnectedWatches] (from
+     * PebbleKit Android 2.** Uses [DefaultPebbleInfoRetriever.getConnectedWatches] (from
      * `io.rebble.pebblekit2:client`) when the library is present. PK2 resolves the installed Pebble mobile app
      * (typically Core Devices, `coredevices.coreapp`) through `DefaultPebbleAndroidAppPicker` (a
      * `queryIntentServices` on the `io.rebble.pebblekit2.SEND_DATA_TO_WATCH` intent), then queries its
@@ -390,14 +388,6 @@ class PebbleCommunicationManager {
      * If no Pebble mobile app is installed / reachable the flow simply emits an empty list — it does not crash —
      * and we fall through to the legacy provider query below. Any exception is caught and logged, also falling
      * through to the legacy path.
-     *
-     * **Fallback path — legacy PebbleKit state provider.** This is the Kotlin port of the legacy
-     * `PebbleKit.isWatchConnected(Context)` check, which queries the **state content providers** exposed by the
-     * Pebble app: the basalt authority (`content://com.getpebble.android.provider.basalt/state`) first, then the
-     * primary authority (`content://com.getpebble.android.provider/state`). Both are re-exposed by Core Devices
-     * (`coredevices.coreapp`). Unlike the classic broadcast-based path, this provider query works reliably on
-     * Android 14+ (API 34+) where PebbleKit's internal `registerReceiver(null, ...)` call throws
-     * [IllegalArgumentException].
      *
      * Row 0 of the state table is the "connected" flag: `1` = connected, `0` = not connected.
      *
