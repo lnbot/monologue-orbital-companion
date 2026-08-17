@@ -301,10 +301,10 @@ class CalendarMonitor(
 
         val projection = arrayOf(
             CalendarContract.Calendars._ID,
-            CalendarContract.Calendars.NAME,
+            CalendarContract.Calendars.CALENDAR_DISPLAY_NAME,
             CalendarContract.Calendars.ACCOUNT_NAME,
         )
-        val selection = "${CalendarContract.Calendars.VISIBLE} = 1"
+        val selection = null;
 
         val newCalendars = mutableListOf<CalendarInfo>()
         try {
@@ -316,7 +316,7 @@ class CalendarMonitor(
                 null,
             )?.use { cursor ->
                 val idCol = cursor.getColumnIndex(CalendarContract.Calendars._ID)
-                val nameCol = cursor.getColumnIndex(CalendarContract.Calendars.NAME)
+                val nameCol = cursor.getColumnIndex(CalendarContract.Calendars.CALENDAR_DISPLAY_NAME)
                 val accountCol = cursor.getColumnIndex(CalendarContract.Calendars.ACCOUNT_NAME)
                 if (idCol < 0) {
                     Log.w(TAG, "refreshAvailableCalendars: _ID column not found.")
