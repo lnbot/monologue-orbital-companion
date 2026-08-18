@@ -17,8 +17,9 @@ import androidx.core.app.ServiceCompat
  * least one sync feature (alarm or calendar) is enabled.
  *
  * The service runs only when [SyncCoordinator.isAlarmSyncEnabled] OR
- * [SyncCoordinator.isCalendarSyncEnabled] is `true` — [SyncCoordinator] starts it when a sync
- * feature is turned on and stops it when both are off. Wrapping sync in a foreground service
+ * [SyncCoordinator.isCalendarSyncEnabled] OR [SyncCoordinator.isTimerSyncEnabled] is `true` —
+ * [SyncCoordinator] starts it when a sync feature is turned on and stops it when all are off.
+ * Wrapping sync in a foreground service
  * (type `connectedDevice`) lets the app keep listening for Pebble sync requests and reacting to
  * alarm/calendar changes even after the UI is destroyed.
  *
@@ -57,8 +58,12 @@ class SyncService : Service() {
 
         // Defense in depth: if no sync feature is enabled the service has no reason to run.
         // SyncCoordinator normally keeps this in sync, but this guards against edge cases (e.g.
-        // a stale START_STICKY restart after both features were turned off).
-        if (!SyncCoordinator.isAlarmSyncEnabled() && !SyncCoordinator.isCalendarSyncEnabled()) {
+        // a stale START_STICKY restart after all features were turned off or the master gate was
+        // disabled).
+        if (!SyncCoordinator.isAlarmSyncEnabled() &&
+            !SyncCoordinator.isCalendarSyncEnabled() &&
+            !SyncCoordinator.isTimerSyncEnabled()
+        ) {
             Log.w(TAG, "onStartCommand: no sync feature enabled; stopping self.")
             stopSelf()
         }

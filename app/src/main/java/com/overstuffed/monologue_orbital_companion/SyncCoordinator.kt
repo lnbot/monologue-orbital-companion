@@ -82,6 +82,12 @@ object SyncCoordinator {
     /** Backing store for persisted settings (created during [initialize]). */
     private var settingsRepository: SettingsRepository? = null
 
+    /** Master sync gate: when off, every per-channel monitor is disabled and the service stops. */
+    private val _masterSyncEnabled = MutableStateFlow(true)
+
+    /** Whether the master sync gate is currently enabled (reactive — UI collects this). */
+    val masterSyncEnabled: StateFlow<Boolean> = _masterSyncEnabled.asStateFlow()
+
     /** Scope used for best-effort (async) persistence and initial settings load. */
     private var syncScope: CoroutineScope? = null
 
@@ -127,18 +133,28 @@ object SyncCoordinator {
         if (repo == null || scope == null) return
         scope.launch {
             try {
-                val alarmEnabled = repo.alarmSyncEnabled.first()
-                val calendarEnabled = repo.calendarSyncEnabled.first()
-                val timerEnabled = repo.timerSyncEnabled.first()
-                if (repo.wasCalendarSelectionStored()) {
-                    calendarMonitor?.applyPersistedSelection(repo.selectedCalendarIds.first())
+                val masterEnabled = repo.masterSyncEnabled.first()
+                _masterSyncEnabled.value = masterEnabled
+                var alarmEnabled = false
+                var calendarEnabled = false
+                var timerEnabled = false
+                // Per-channel settings are only applied when the master gate is on; otherwise the
+                // monitors stay disabled (their listeners unregistered) and the service stops.
+                if (masterEnabled) {
+                    alarmEnabled = repo.alarmSyncEnabled.first()
+                    calendarEnabled = repo.calendarSyncEnabled.first()
+                    timerEnabled = repo.timerSyncEnabled.first()
+                    if (repo.wasCalendarSelectionStored()) {
+                        calendarMonitor?.applyPersistedSelection(repo.selectedCalendarIds.first())
+                    }
+                    applyAlarmSyncEnabled(alarmEnabled)
+                    applyCalendarSyncEnabled(calendarEnabled)
+                    applyTimerSyncEnabled(timerEnabled)
                 }
-                applyAlarmSyncEnabled(alarmEnabled)
-                applyCalendarSyncEnabled(calendarEnabled)
-                applyTimerSyncEnabled(timerEnabled)
                 Log.i(
                     TAG,
-                    "loadPersistedSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled, timer=$timerEnabled.",
+                    "loadPersistedSettings: master=$masterEnabled, applied alarm=$alarmEnabled, " +
+                        "calendar=$calendarEnabled, timer=$timerEnabled.",
                 )
                 // Persisted settings are now authoritative — start/stop the sync service to match.
                 updateServiceState()
@@ -180,16 +196,84 @@ object SyncCoordinator {
         }
     }
 
+    // ---------------------------------------------------------------
+    // Master sync gate
+    // ---------------------------------------------------------------
+
     /**
-     * Starts or stops the foreground [SyncService] based on whether any sync feature is enabled.
+     * Enables or disables the master sync gate.
      *
-     * The service runs only while alarm OR calendar syncing is on, and is stopped when both are
-     * off. Safe to call repeatedly — starting an already-running service merely re-posts the
+     * Disabling disables every per-channel monitor — unregistering the alarm receiver, the
+     * calendar observer, and the timer callback — and stops the foreground [SyncService]. The
+     * individual per-channel *preferences* are left untouched so they are restored when the
+     * master gate is turned back on.
+     *
+     * Enabling re-applies the persisted per-channel settings, re-registering any listeners that
+     * were previously on and restarting the service if needed.
+     */
+    fun setMasterSyncEnabled(enabled: Boolean) {
+        if (enabled) {
+            Log.i(TAG, "setMasterSyncEnabled(true): master sync enabled; re-applying persisted settings.")
+            _masterSyncEnabled.value = true
+            persist { it.setMasterSyncEnabled(true) }
+            reloadIndividualSettings()
+            updateServiceState()
+        } else {
+            Log.i(TAG, "setMasterSyncEnabled(false): master sync disabled; stopping all sync.")
+            _masterSyncEnabled.value = false
+            persist { it.setMasterSyncEnabled(false) }
+            applyAlarmSyncEnabled(false)
+            applyCalendarSyncEnabled(false)
+            applyTimerSyncEnabled(false)
+            updateServiceState()
+        }
+    }
+
+    /** Whether the master sync gate is currently enabled. */
+    fun isMasterSyncEnabled(): Boolean = _masterSyncEnabled.value
+
+    /**
+     * Re-applies the persisted per-channel settings to the monitors. Used when the master gate
+     * is turned back on so previously-enabled channels resume immediately.
+     */
+    private fun reloadIndividualSettings() {
+        val repo = settingsRepository
+        val scope = syncScope
+        if (repo == null || scope == null) return
+        scope.launch {
+            try {
+                val alarmEnabled = repo.alarmSyncEnabled.first()
+                val calendarEnabled = repo.calendarSyncEnabled.first()
+                val timerEnabled = repo.timerSyncEnabled.first()
+                applyAlarmSyncEnabled(alarmEnabled)
+                applyCalendarSyncEnabled(calendarEnabled)
+                applyTimerSyncEnabled(timerEnabled)
+                updateServiceState()
+                Log.i(
+                    TAG,
+                    "reloadIndividualSettings: applied alarm=$alarmEnabled, calendar=$calendarEnabled, " +
+                        "timer=$timerEnabled.",
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "reloadIndividualSettings: failed to re-apply settings.", e)
+            }
+        }
+    }
+
+    /**
+     * Starts or stops the foreground [SyncService] based on the master gate and whether any
+     * sync feature is enabled.
+     *
+     * The service runs only while the master gate is on AND at least one of alarm/calendar/timer
+     * syncing is on, and is stopped when the master gate is off or all three channels are off.
+     * Safe to call repeatedly — starting an already-running service merely re-posts the
      * notification, and stopping a non-running service is a no-op.
      */
     private fun updateServiceState() {
         val ctx = appContext ?: return
-        if (isAlarmSyncEnabled() || isCalendarSyncEnabled() || isTimerSyncEnabled()) {
+        if (isMasterSyncEnabled() &&
+            (isAlarmSyncEnabled() || isCalendarSyncEnabled() || isTimerSyncEnabled())
+        ) {
             SyncService.start(ctx)
         } else {
             SyncService.stop(ctx)

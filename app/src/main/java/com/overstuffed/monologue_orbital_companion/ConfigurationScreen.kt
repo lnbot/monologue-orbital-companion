@@ -97,6 +97,7 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
 
     // Reactive sync-enabled state collected from the coordinator, which is populated from
     // DataStore during initialize(). Toggles update automatically when persisted values load.
+    val masterSyncEnabled by SyncCoordinator.masterSyncEnabled.collectAsState()
     val alarmSyncEnabled by SyncCoordinator.alarmSyncEnabled.collectAsState()
     val calendarSyncEnabled by SyncCoordinator.calendarSyncEnabled.collectAsState()
     val timerSyncEnabled by SyncCoordinator.timerSyncEnabled.collectAsState()
@@ -217,6 +218,12 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
         }
     }
 
+    fun onMasterToggle(checked: Boolean) {
+        Log.i(TAG, "UI: master sync toggle -> $checked")
+        SyncCoordinator.setMasterSyncEnabled(checked)
+        Log.i(TAG, if (checked) "Master sync enabled." else "Master sync disabled; all channels stopped.")
+    }
+
     fun onAlarmToggle(checked: Boolean) {
         Log.i(TAG, "UI: alarm sync toggle -> $checked")
         SyncCoordinator.setAlarmSyncEnabled(checked)
@@ -322,11 +329,22 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
                 color = MaterialTheme.colorScheme.primary,
             )
 
+            // Master gate: the first toggle on the page. Turning it off unregisters every
+            // listener (alarm, calendar, timer) and shuts down the foreground service.
+            SwitchRow(
+                title = "Enable Sync",
+                subtitle = "Master switch for all syncing with your watch.",
+                icon = { Icon(Icons.Rounded.CloudSync, contentDescription = null) },
+                checked = masterSyncEnabled,
+                onCheckedChange = ::onMasterToggle,
+            )
+
             SwitchRow(
                 title = "Sync Alarm",
                 subtitle = "Push the next scheduled phone alarm to the watchface.",
                 icon = { Icon(Icons.Rounded.Alarm, contentDescription = null) },
                 checked = alarmSyncEnabled,
+                enabled = masterSyncEnabled,
                 onCheckedChange = ::onAlarmToggle,
             )
 
@@ -335,6 +353,7 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
                 subtitle = "Push upcoming calendar events to the watchface.",
                 icon = { Icon(Icons.Rounded.CalendarMonth, contentDescription = null) },
                 checked = calendarSyncEnabled,
+                enabled = masterSyncEnabled,
                 onCheckedChange = ::onCalendarToggle,
             )
 
@@ -343,6 +362,7 @@ fun ConfigurationScreen(modifier: Modifier = Modifier) {
                 subtitle = "Push the active timer's end time to the watchface (needs notification access).",
                 icon = { Icon(Icons.Rounded.Timer, contentDescription = null) },
                 checked = timerSyncEnabled,
+                enabled = masterSyncEnabled,
                 onCheckedChange = ::onTimerToggle,
             )
 
@@ -532,6 +552,7 @@ private fun SwitchRow(
     subtitle: String,
     icon: @Composable () -> Unit,
     checked: Boolean,
+    enabled: Boolean = true,
     onCheckedChange: (Boolean) -> Unit,
 ) {
     Surface(
@@ -570,7 +591,7 @@ private fun SwitchRow(
                 )
             }
             Spacer(Modifier.size(8.dp))
-            Switch(checked = checked, onCheckedChange = onCheckedChange)
+            Switch(checked = checked, enabled = enabled, onCheckedChange = onCheckedChange)
         }
     }
 }

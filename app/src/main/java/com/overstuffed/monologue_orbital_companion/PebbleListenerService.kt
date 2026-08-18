@@ -7,6 +7,8 @@ import android.content.IntentFilter
 import android.util.Log
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import com.getpebble.android.kit.Constants
+import com.getpebble.android.kit.PebbleKit
 import com.getpebble.android.kit.util.PebbleDictionary
 import java.util.UUID
 
@@ -39,7 +41,7 @@ object PebbleListenerService {
      * Extra key for the sender watchapp UUID in the incoming broadcast.
      * Value type: [UUID] (Serializable).
      */
-    private const val EXTRA_UUID = "uuid"
+    private const val EXTRA_UUID = Constants.APP_UUID
 
     /**
      * Extra key for the incoming AppMessage data in the broadcast.
@@ -48,7 +50,15 @@ object PebbleListenerService {
      * serialization of the message (e.g. `[{"key":110,"type":"uint","length":4,"value":1}]`),
      * so it must be decoded via [PebbleDictionary.fromJson] before use.
      */
-    private const val EXTRA_DATA = "msg_data"
+    private const val EXTRA_DATA = Constants.MSG_DATA
+
+    /**
+     * Extra key for the transaction id of the incoming AppMessage.
+     *
+     * Every message received from the watch must be acknowledged (ACK/NACK) with this id so the
+     * watch never hits its AppMessage protocol timeout.
+     */
+    private const val EXTRA_TRANSACTION_ID = Constants.TRANSACTION_ID
 
     private var receiver: BroadcastReceiver? = null
     private var isRegistered = false
@@ -69,7 +79,7 @@ object PebbleListenerService {
         val intentFilter = IntentFilter(ACTION_RECEIVE_FROM_WATCH)
         receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
-                handleReceive(intent)
+                handleReceive(context, intent)
             }
         }
         try {
@@ -115,18 +125,43 @@ object PebbleListenerService {
     /**
      * Handles an incoming Pebble AppMessage broadcast.
      *
-     * Extracts the UUID and [PebbleDictionary] from the intent extras and dispatches sync requests.
+     * Extracts the UUID, transaction id, and [PebbleDictionary] from the intent extras and
+     * dispatches sync requests.
+     *
+     * Per the PebbleKit protocol, every AppMessage received from the watch must be acknowledged,
+     * otherwise the watch times out and drops the message. We therefore send an **ACK** as soon
+     * as the message is successfully read/decoded and a **NACK** when reading or decoding fails
+     * — but only when the message comes from [PebbleMessageKeys.WATCHFACE_UUID]. Messages from
+     * other watch apps (or broadcasts with no identifiable sender) are ignored entirely.
      */
-    private fun handleReceive(intent: Intent) {
+    private fun handleReceive(context: Context, intent: Intent) {
         val uuid = IntentCompat.getSerializableExtra(intent, EXTRA_UUID, UUID::class.java)
 
-        // The Pebble Core app broadcasts the message data as a String (the JSON serialization of
+        // The Pebble Core app broadcasts the message data as a JSON String (the serialization of
         // the PebbleDictionary), not as a PebbleDictionary object, so we read it as a raw string
         // and decode it before use.
         val json = intent.getStringExtra(EXTRA_DATA)
 
-        if (uuid == null || json.isNullOrBlank()) {
-            Log.w(TAG, "handleReceive: received broadcast with null uuid or data.")
+        // The transaction id ties our ACK/NACK back to the specific message on the watch.
+        // Valid ids are in (0, 255); outside that range no reply can be sent.
+        val transactionId = intent.getIntExtra(EXTRA_TRANSACTION_ID, -1)
+        val canRespond = transactionId in 0..255
+
+        // Only ACK/NACK messages from our watchface; silently ignore everything else.
+        if (uuid != PebbleMessageKeys.WATCHFACE_UUID) {
+            Log.w(
+                TAG,
+                if (uuid == null) "handleReceive: received broadcast with null uuid; ignoring."
+                else "handleReceive: ignoring message from foreign watchapp $uuid.",
+            )
+            return
+        }
+
+        // From here on the message is from our watchface: read/parse it, then ACK on success or
+        // NACK on failure so the watch never hits its protocol timeout.
+        if (json.isNullOrBlank()) {
+            Log.w(TAG, "handleReceive: message from watchface with null/blank data; sending NACK.")
+            sendNack(context, transactionId, canRespond)
             return
         }
 
@@ -138,16 +173,13 @@ object PebbleListenerService {
         }
 
         if (data == null) {
+            Log.w(TAG, "handleReceive: failed to parse message data; sending NACK.")
+            sendNack(context, transactionId, canRespond)
             return
         }
 
-        Log.d(TAG, "handleReceive: from watchappUUID=$uuid")
-
-        // Only handle messages for our watchface; silently ignore others.
-        if (uuid != PebbleMessageKeys.WATCHFACE_UUID) {
-            Log.w(TAG, "handleReceive: ignoring message from foreign watchapp $uuid.")
-            return
-        }
+        // Successfully read the request — acknowledge receipt before dispatching.
+        sendAck(context, transactionId, canRespond)
 
         Log.d(TAG, "handleReceive: watchapp=$uuid data keys=${describeKeys(data)}")
 
@@ -158,6 +190,44 @@ object PebbleListenerService {
             SyncCoordinator.onWatchSyncRequested()
         } else {
             Log.d(TAG, "handleReceive: received message with unknown keys (no sync request).")
+        }
+    }
+
+    /**
+     * Sends an ACK to the watch for the given [transactionId].
+     *
+     * When no valid transaction id is available the reply is skipped (nothing to correlate the
+     * ACK to) and the failure is logged. Exceptions from PebbleKit are caught and logged so a
+     * reply problem never crashes the receiver.
+     */
+    private fun sendAck(context: Context, transactionId: Int, canRespond: Boolean) {
+        if (!canRespond) {
+            Log.w(TAG, "Cannot ACK: transactionId=$transactionId is missing or out of the valid range.")
+            return
+        }
+        try {
+            PebbleKit.sendAckToPebble(context.applicationContext, transactionId)
+            Log.i(TAG, "ACK sent for transactionId=$transactionId.")
+        } catch (e: Exception) {
+            Log.e(TAG, "sendAck: failed to send ACK for transactionId=$transactionId.", e)
+        }
+    }
+
+    /**
+     * Sends a NACK to the watch for the given [transactionId].
+     *
+     * Mirrors [sendAck] — skips (with a log) when no valid transaction id is available.
+     */
+    private fun sendNack(context: Context, transactionId: Int, canRespond: Boolean) {
+        if (!canRespond) {
+            Log.w(TAG, "Cannot NACK: transactionId=$transactionId is missing or out of the valid range.")
+            return
+        }
+        try {
+            PebbleKit.sendNackToPebble(context.applicationContext, transactionId)
+            Log.i(TAG, "NACK sent for transactionId=$transactionId.")
+        } catch (e: Exception) {
+            Log.e(TAG, "sendNack: failed to send NACK for transactionId=$transactionId.", e)
         }
     }
 

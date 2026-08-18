@@ -28,11 +28,20 @@ val Context.dataStore by preferencesDataStore(name = "settings")
 class SettingsRepository(private val context: Context) {
 
     private object Keys {
+        val MasterSyncEnabled = booleanPreferencesKey("master_sync_enabled")
         val AlarmSyncEnabled = booleanPreferencesKey("alarm_sync_enabled")
         val CalendarSyncEnabled = booleanPreferencesKey("calendar_sync_enabled")
         val TimerSyncEnabled = booleanPreferencesKey("timer_sync_enabled")
         val SelectedCalendarIds = stringSetPreferencesKey("selected_calendar_ids")
     }
+
+    /**
+     * Whether the master sync gate is enabled. Defaults to `true` when never set so existing
+     * installs keep their previous behavior, and individual channels are still gated by their
+     * own toggles.
+     */
+    val masterSyncEnabled: Flow<Boolean> =
+        context.dataStore.data.map { it[Keys.MasterSyncEnabled] ?: true }
 
     /** Whether alarm syncing is enabled. Defaults to `false` when never set. */
     val alarmSyncEnabled: Flow<Boolean> =
@@ -65,6 +74,10 @@ class SettingsRepository(private val context: Context) {
      */
     suspend fun wasCalendarSelectionStored(): Boolean =
         context.dataStore.data.first().contains(Keys.SelectedCalendarIds)
+
+    suspend fun setMasterSyncEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[Keys.MasterSyncEnabled] = enabled }
+    }
 
     suspend fun setAlarmSyncEnabled(enabled: Boolean) {
         context.dataStore.edit { it[Keys.AlarmSyncEnabled] = enabled }

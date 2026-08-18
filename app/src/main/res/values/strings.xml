@@ -6,4 +6,9 @@
     <string name="sync_service_notification_text">Syncing alarm &amp; calendar to watch</string>
     <string name="sync_service_channel_name">Sync Service</string>
     <string name="sync_service_channel_description">Shows a persistent notification while alarm or calendar syncing is active.</string>
+
+    <!-- Quick Settings tile for the master sync gate -->
+    <string name="tile_master_sync_label">Watch Event Sync</string>
+    <string name="tile_master_sync_on">On</string>
+    <string name="tile_master_sync_off">Off</string>
 </resources>

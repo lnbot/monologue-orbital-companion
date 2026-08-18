@@ -54,6 +54,19 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!-- Quick Settings tile that toggles the master sync gate. Exported (mandatory) and
+             guarded by BIND_QUICK_SETTINGS_TILE so only the SystemUI can bind it. -->
+        <service
+            android:name=".MasterSyncTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_quick_settings_sync"
+            android:label="@string/tile_master_sync_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
     </application>
 
 </manifest>
